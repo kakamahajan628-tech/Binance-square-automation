@@ -1,0 +1,6 @@
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+httpx>=0.28,<1
+python-dotenv>=1.0,<2
+Pillow>=11,<13
+tzdata>=2025.1

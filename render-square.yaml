@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: square-desk
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements-square.txt
+    startCommand: python -m square_desk
+    healthCheckPath: /health
+    disk:
+      name: square-desk-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.14
+      - key: PYTHONUNBUFFERED
+        value: '1'
+      - key: DESK_DATABASE
+        value: /var/data/desk.sqlite3
+      - key: DESK_ARTIFACTS
+        value: /var/data/artifacts
+      - key: DESK_PAPER_MODE
+        value: 'true'
+      - key: DESK_LIVE_ENABLED
+        value: 'false'
+      - key: DESK_MODE
+        value: approval
+      - key: DESK_TIMEZONE
+        value: Asia/Kolkata
+      - key: DESK_ADMIN_TOKEN
+        generateValue: true
+      - key: DESK_TELEGRAM_TOKEN
+        sync: false
+      - key: DESK_TELEGRAM_ADMINS
+        sync: false
+      - key: DESK_WEBHOOK_SECRET
+        generateValue: true
+      - key: DESK_TELEGRAM_POLLING
+        value: 'false'
