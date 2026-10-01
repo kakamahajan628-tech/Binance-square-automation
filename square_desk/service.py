@@ -62,7 +62,8 @@ class Desk:
                 'live_adapter_enabled': self.s.live_enabled, 'paused': self.db.state('paused', False),
                 'emergency_stop': self.db.state('emergency_stop', False),
                 'publisher_blocked': self.db.state('publisher_blocked', False),
-                'scheduler': 'running' if self.task and not self.task.done() and self.lease_owned else 'stopped',
+                'scheduler': ('running' if self.lease_owned else 'waiting_for_worker_lease')
+                             if self.task and not self.task.done() else 'stopped',
                 'last_scan': last, 'data_fresh': bool(last and now - last <= self.s.scan_seconds * 2),
                 'queue_size': len(self.db.list('draft', ['queued', 'approved', 'review'], limit=10000)),
                 'last_publication': self.db.state('last_publication'),
@@ -268,7 +269,11 @@ class Desk:
 
     async def heartbeat(self):
         while not self.stopping:
-            self.lease_owned = self.db.acquire_lease(self.owner, 120)
+            try:
+                self.lease_owned = self.db.acquire_lease(self.owner, 120)
+            except Exception as exc:
+                self.lease_owned = False
+                logging.getLogger('square_desk').error('Worker lease renewal failed: %s', type(exc).__name__)
             if not self.lease_owned:
                 if self.task:
                     self.task.cancel()
@@ -279,7 +284,14 @@ class Desk:
         while not self.stopping:
             try:
                 if not self.lease_owned:
-                    return
+                    self.lease_owned = self.db.acquire_lease(self.owner, 120)
+                    if not self.lease_owned:
+                        await asyncio.sleep(5)
+                        continue
+                    # Recovery must only happen after exclusive ownership.
+                    self.db.recover()
+                    self.heartbeat_task = asyncio.create_task(self.heartbeat())
+                    logging.getLogger('square_desk').info('Worker lease acquired; scheduler active')
                 await self.cycle()
             except asyncio.CancelledError:
                 raise
@@ -292,11 +304,16 @@ class Desk:
 
     async def start(self):
         self.lease_owned = self.db.acquire_lease(self.owner, 120)
-        if not self.lease_owned:
-            raise RuntimeError('Another worker owns this database; use one service instance')
-        self.db.recover()
+        if self.lease_owned:
+            self.db.recover()
+            self.heartbeat_task = asyncio.create_task(self.heartbeat())
+        else:
+            # During a rolling deploy Render keeps the old instance running
+            # until this instance is healthy. Serve the dashboard/health while
+            # waiting; collection, Telegram polling and publishing stay idle.
+            logging.getLogger('square_desk').info(
+                'Waiting for previous worker lease; HTTP ready, scheduler standby')
         self.task = asyncio.create_task(self.run())
-        self.heartbeat_task = asyncio.create_task(self.heartbeat())
 
     async def close(self):
         self.stopping = True
@@ -307,8 +324,15 @@ class Desk:
                     await task
                 except asyncio.CancelledError:
                     pass
-        lease = self.db.state('worker_lease', {})
-        if lease.get('owner') == self.owner:
-            self.db.set('worker_lease', {'owner': self.owner, 'until': 0})
-        await self.client.aclose()
-        self.db.close()
+                except Exception as exc:
+                    logging.getLogger('square_desk').error('Worker stopped with error: %s', type(exc).__name__)
+        try:
+            # Checking owner and releasing must be one transaction so a retiring
+            # instance cannot erase the successor's lease.
+            with self.db.transaction():
+                lease = self.db.state('worker_lease', {})
+                if lease.get('owner') == self.owner:
+                    self.db.set('worker_lease', {'owner': self.owner, 'until': 0})
+        finally:
+            await self.client.aclose()
+            self.db.close()
