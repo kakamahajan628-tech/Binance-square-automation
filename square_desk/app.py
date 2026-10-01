@@ -58,7 +58,7 @@ def create_app(settings=None, desk=None, start_worker=True):
         response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'"
         return response
 
-    @app.get('/health')
+    @app.api_route('/health', methods=['GET', 'HEAD'])
     async def health():
         return {'status': 'ok', 'service': 'square_desk'}
 
