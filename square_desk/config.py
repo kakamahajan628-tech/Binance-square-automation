@@ -15,7 +15,7 @@ def boolean(name, default):
 
 @dataclass
 class Settings:
-    database: str = 'runtime/square/desk.sqlite3'
+    database: str = field(default='runtime/square/desk.sqlite3', repr=False)
     artifacts: str = 'runtime/square/artifacts'
     timezone: str = 'Asia/Kolkata'
     paper_mode: bool = True
@@ -71,6 +71,8 @@ class Settings:
         from dotenv import load_dotenv
         load_dotenv('.env.square', override=False)
         s = cls()
+        # Dedicated URL takes precedence over the legacy local SQLite path.
+        database_url = os.getenv('DESK_DATABASE_URL') or os.getenv('DATABASE_URL')
         for name in s.__dataclass_fields__:
             env = os.getenv('DESK_' + name.upper())
             if env is None or env == '':
@@ -89,6 +91,10 @@ class Settings:
             else:
                 value = env
             setattr(s, name, value)
+        if database_url:
+            if not database_url.startswith(('postgresql://', 'postgres://')):
+                raise ValueError('DATABASE_URL must be a PostgreSQL connection URL')
+            s.database = database_url
         s.validate()
         return s
 
@@ -134,6 +140,16 @@ class Settings:
         an empty database and losing publication history.
         """
         prefix = '/var/data'
+        postgres = self.database.startswith(('postgresql://', 'postgres://'))
+        if postgres:
+            from urllib.parse import urlsplit, parse_qs
+            try:
+                url = urlsplit(self.database)
+                secure = parse_qs(url.query).get('sslmode', [''])[0]
+                if not url.hostname or not url.path.strip('/') or secure not in ('require', 'verify-ca', 'verify-full'):
+                    raise ValueError
+            except ValueError:
+                raise ValueError('PostgreSQL URL requires a host, database and sslmode=require or stronger') from None
         disk_paths = {
             name: value for name, value in (('database', self.database), ('artifacts', self.artifacts))
             if value == prefix or value.startswith(prefix + '/')
@@ -147,16 +163,20 @@ class Settings:
                 if not destination.is_relative_to(fallback.resolve()):
                     raise ValueError('Storage path escapes the runtime directory')
                 setattr(self, name, str(destination))
-            self.live_enabled = False
+            if not postgres:
+                self.live_enabled = False
             logging.getLogger('square_desk').warning(
                 'Persistent disk /var/data is missing. Using application-local '
-                'runtime storage; data may be lost on redeploy/restart. '
-                'Live Square publishing is disabled until durable storage is configured.'
+                'artifact storage; files may be lost on redeploy/restart. ' +
+                ('PostgreSQL keeps database state durable.' if postgres else
+                 'Database data may be lost; live Square publishing is disabled until durable storage is configured.')
             )
         Path(self.artifacts).mkdir(parents=True, exist_ok=True)
-        if self.database != ':memory:':
+        if not postgres and self.database != ':memory:':
             Path(self.database).parent.mkdir(parents=True, exist_ok=True)
 
     def public(self):
-        excluded = {'admin_token', 'telegram_token', 'webhook_secret', 'square_key', 'ai_key', 'ai_url', 'news_feeds'}
-        return {**{k: v for k, v in asdict(self).items() if k not in excluded}, 'news_feed_count': len(self.news_feeds)}
+        excluded = {'database', 'admin_token', 'telegram_token', 'webhook_secret', 'square_key', 'ai_key', 'ai_url', 'news_feeds'}
+        return {**{k: v for k, v in asdict(self).items() if k not in excluded},
+                'database_backend': 'postgresql' if self.database.startswith(('postgresql://', 'postgres://')) else 'sqlite',
+                'news_feed_count': len(self.news_feeds)}
