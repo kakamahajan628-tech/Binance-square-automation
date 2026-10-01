@@ -6,6 +6,34 @@ import httpx
 from .models import utc, uid
 
 
+def rejection_message(error):
+    # Only fixed application-owned messages may be exposed. Raw exceptions
+    # can contain database credentials, provider URLs or administrator input.
+    safe = {
+        'Same underlying event already covered': 'BTC ya selected symbol ka event pehle se covered hai. /queue aur /posts check karo; existing draft ID use karo.',
+        'Draft too similar to recent content': 'Draft recent content jaisa hai. /queue aur /posts check karo; duplicate post blocked hai.',
+        'Unknown draft': 'Draft ID nahi mili. /queue se current database ki actual ID copy karo.',
+        'Draft is immutable after publication or expiry': 'Draft publish, reject ya expire ho chuka hai. /queue se active draft select karo.',
+        'Symbol must be on configured watchlist': 'Symbol watchlist mein nahi hai. /settings mein symbols check karo.',
+        'Market evidence expired or future dated': 'Market evidence expired ya future dated hai. Fresh draft chahiye.',
+        'Word count outside configured limits': 'Draft word count configured limits se match nahi karta. /settings check karo.',
+        'Number is not bound to recorded evidence': 'Draft mein ek number recorded evidence se match nahi karta; publishing blocked hai.',
+        'Missing source or timestamp': 'Draft ka source ya timestamp missing hai.',
+        'Missing relevant ticker': 'Draft mein relevant ticker missing hai.',
+        'Invalid formatting': 'Draft formatting validation fail hui.',
+        'Prohibited promotion or unsupported profit language': 'Draft content validation fail hui; unsupported promotional claim blocked hai.',
+        'Control characters are not permitted': 'Draft mein invalid control characters hain.',
+        'Long articles require a configured AI endpoint; short analysis stays available': 'Article ke liye AI integration chahiye. Short post ke liye /post_now BTC use karo.',
+    }
+    if isinstance(error, ValueError):
+        messages = [safe[reason] for reason in str(error).split('; ') if reason in safe]
+        if messages:
+            return 'Command rejected: ' + ' '.join(dict.fromkeys(messages))
+    if isinstance(error, sqlite3.IntegrityError):
+        return 'Command rejected: database constraint conflict. /queue aur /posts check karo; duplicate automatically retry nahi kiya gaya.'
+    return 'Command rejected. Check input, draft state, evidence freshness, or campaign requirements.'
+
+
 HELP = '''Square Desk controls
 /status /dashboard /queue /next /today /posts /articles
 /movers [15m|1h|4h|12h|24h|3d|7d] /gainers /losers /signals /alerts
@@ -131,10 +159,10 @@ class Telegram:
         try:
             result = await self.command(str(message.get('text', '')))
             self.db.update(command_id, status='applied')
-        except (ValueError, KeyError, TypeError, sqlite3.IntegrityError):
+        except (ValueError, KeyError, TypeError, sqlite3.IntegrityError) as error:
             self.db.update(command_id, status='rejected')
-            result = 'Command rejected. Check input, draft state, evidence freshness, or campaign requirements.'
-            self.db.log('TELEGRAM', 'Command input or state rejected')
+            result = rejection_message(error)
+            self.db.log('TELEGRAM', result)
         self.notify(result, key='command:' + str(update['update_id']))
         if callback:
             await self.api('answerCallbackQuery', {'callback_query_id': callback['id']})
