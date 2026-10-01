@@ -3,6 +3,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 import os
 import re
+import logging
 
 
 def boolean(name, default):
@@ -123,7 +124,38 @@ class Settings:
             raise ValueError('Telegram requires numeric administrator IDs and a webhook secret')
         if self.live_enabled and (not self.square_key or not self.admin_token or not self.policy_reviewed):
             raise ValueError('Live adapter requires Square key, admin token, and policy review date')
+        self.prepare_storage()
+
+    def prepare_storage(self):
+        """Handle a missing Render disk without creating a privileged directory.
+
+        Only the conventional /var/data paths may fall back. An existing disk
+        with permission problems must fail, rather than silently switching to
+        an empty database and losing publication history.
+        """
+        prefix = '/var/data'
+        disk_paths = {
+            name: value for name, value in (('database', self.database), ('artifacts', self.artifacts))
+            if value == prefix or value.startswith(prefix + '/')
+        }
+        if disk_paths and not Path(prefix).exists():
+            fallback = Path(__file__).resolve().parents[1] / 'runtime' / 'square'
+            for name, value in disk_paths.items():
+                relative = value[len(prefix):].lstrip('/')
+                # Both locations remain inside the application runtime folder.
+                destination = (fallback / relative).resolve()
+                if not destination.is_relative_to(fallback.resolve()):
+                    raise ValueError('Storage path escapes the runtime directory')
+                setattr(self, name, str(destination))
+            self.live_enabled = False
+            logging.getLogger('square_desk').warning(
+                'Persistent disk /var/data is missing. Using application-local '
+                'runtime storage; data may be lost on redeploy/restart. '
+                'Live Square publishing is disabled until durable storage is configured.'
+            )
         Path(self.artifacts).mkdir(parents=True, exist_ok=True)
+        if self.database != ':memory:':
+            Path(self.database).parent.mkdir(parents=True, exist_ok=True)
 
     def public(self):
         excluded = {'admin_token', 'telegram_token', 'webhook_secret', 'square_key', 'ai_key', 'ai_url', 'news_feeds'}
