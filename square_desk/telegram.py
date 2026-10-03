@@ -41,6 +41,10 @@ def rejection_message(error):
         'Long articles require a configured AI endpoint; short analysis stays available': 'Article ke liye AI integration chahiye. Short post ke liye /post_now BTC use karo.',
     }
     if isinstance(error, ValueError):
+        length = re.fullmatch(r'AI body word count (\d{1,6}); required (\d{1,6})-(\d{1,6})', str(error))
+        if length:
+            count, lower, upper = length.groups()
+            return f'Command rejected: AI body mein {count} words aaye; required {lower}-{upper}. Draft save/publish nahi hua.'
         messages = [safe[reason] for reason in str(error).split('; ') if reason in safe]
         if messages:
             return 'Command rejected: ' + ' '.join(dict.fromkeys(messages))
