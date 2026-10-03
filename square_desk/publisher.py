@@ -62,11 +62,17 @@ class PublicationService:
         self.s, self.db, self.checker = settings, store, checker
         self.policy = Compliance(settings, store)
         self.adapter = SquarePublisher(settings.square_key, client)
+        self.worker_owner = None
 
     async def publish(self, ident):
         # The worker holds a service lease. Reservation and state change are atomic,
         # and no transaction stays open during remote I/O.
         with self.db.transaction():
+            if self.worker_owner is not None:
+                lease = self.db.state('worker_lease', {})
+                if lease.get('owner') != self.worker_owner or lease.get('until', 0) <= utc():
+                    self.db.log('PUBLISH', 'Worker lease not held; publication withheld', ident)
+                    return
             row = self.db.get(ident)
             if not row or row['status'] != 'queued':
                 return
