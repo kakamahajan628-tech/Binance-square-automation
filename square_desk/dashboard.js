@@ -3,6 +3,8 @@ const show = (id, value) => $(id).textContent = JSON.stringify(value, null, 2);
 // Strip any URL userinfo before constructing Fetch requests. Browser-managed
 // HTTP authentication still supplies credentials for this same origin.
 const apiURL = path => new URL(path, window.location.origin).href;
+let refreshTimer = null;
+let refreshDelay = 30000;
 async function command(text) {
   const response = await fetch(apiURL('/api/command'), {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:text})});
   const value = await response.json();
@@ -10,10 +12,13 @@ async function command(text) {
   await refresh();
 }
 async function refresh() {
+  clearTimeout(refreshTimer);
   try {
     const response = await fetch(apiURL('/api/overview'));
     if (!response.ok) throw new Error('Authentication or service unavailable');
     const data = await response.json();
+    // Saver mode must not keep Neon awake via an open dashboard tab.
+    refreshDelay = data.status.neon_batch_seconds > 0 ? 0 : 30000;
     $('mode').textContent = data.status.paper_mode ? 'PAPER MODE' : data.status.live_adapter_enabled ? 'LIVE ENABLED' : 'MANUAL EXPORT';
     show('status', data.status); show('signals', data.signals); show('campaigns', data.campaigns); show('report', data.report); show('logs', data.logs);
     $('movers').replaceChildren();
@@ -37,9 +42,10 @@ async function refresh() {
       $('drafts').append(article);
     }
   } catch(error) { $('message').textContent=error.message; }
+  finally { if(refreshDelay && !document.hidden) refreshTimer = setTimeout(refresh,refreshDelay); }
 }
 document.querySelectorAll('[data-command]').forEach(button=>button.addEventListener('click',()=>command(button.dataset.command)));
 $('refresh').addEventListener('click',refresh);
 $('command-form').addEventListener('submit',event=>{event.preventDefault();command($('command').value);});
 fetch(apiURL('/api/command'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:'/help'})}).then(r=>r.json()).then(v=>$('help').textContent=v.message);
-refresh();setInterval(refresh,30000);
+refresh();
