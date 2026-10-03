@@ -61,6 +61,8 @@ class Settings:
     fee_bps: float = 10
     slippage_bps: float = 5
     retention_days: int = 30
+    snapshot_retention_days: int = 2
+    neon_batch_seconds: int = 900
     report_weekday: int = 6
     report_hour: int = 20
     report_minute: int = 0
@@ -112,6 +114,10 @@ class Settings:
                 raise ValueError(f'{name} must be positive')
         if self.platform_daily_cap > 100 or self.scan_seconds < 60:
             raise ValueError('Daily cap must be <=100 and scan interval >=60 seconds')
+        if not 1 <= self.snapshot_retention_days <= self.retention_days:
+            raise ValueError('Snapshot retention must be 1..retention_days')
+        if self.neon_batch_seconds != 0 and not 900 <= self.neon_batch_seconds <= 3600:
+            raise ValueError('Neon batch interval must be 0 or 900..3600 seconds')
         if not 0 <= self.min_confidence <= 100 or not 0 < self.similarity_threshold <= 1:
             raise ValueError('Invalid confidence or similarity threshold')
         if self.fee_bps < 0 or self.slippage_bps < 0 or self.policy_max_age_days <= 0:
