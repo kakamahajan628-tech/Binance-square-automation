@@ -2,6 +2,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from .models import utc
 from .compliance import Compliance
+from .planning import PlanningStore
+from copy import copy
 
 
 class Scheduler:
@@ -11,19 +13,23 @@ class Scheduler:
 
     def allocate(self, now=None):
         now = utc() if now is None else now
-        if self.db.state('paused', False) or self.db.state('emergency_stop', False):
+        db = PlanningStore(self.db)
+        policy = Compliance(self.s, db)
+        checker = copy(self.checker)
+        checker.db = db
+        if db.state('paused', False) or db.state('emergency_stop', False):
             return
-        rows = self.db.list('draft', ['approved', 'queued'])
+        rows = db.list('draft', ['approved', 'queued'])
         # Rebuild queued slots each cycle. Priority content takes the first available
         # slot; lower priority conflicts move later without ignoring platform limits.
         for row in rows:
-            self.db.update(row['id'], status='approved', clear_due=True)
+            db.update(row['id'], status='approved', clear_due=True)
         rows.sort(key=lambda r: (-r['payload']['priority'], r['created']))
         for row in rows:
             draft = row['payload']
             candidate = max(now, draft.get('not_before', now))
             if draft['category'] == 'education':
-                audience = self.db.state('audience_hours', {})
+                audience = db.state('audience_hours', {})
                 choices = []
                 for minutes in range(24 * 60):
                     ts = candidate + minutes * 60
@@ -34,15 +40,15 @@ class Scheduler:
                     candidate = -max(choices)[1]
             placed = False
             for _ in range(24 * 60):
-                if self.checker.check(draft, candidate):
+                if checker.check(draft, candidate):
                     break
-                if not self.policy.gate(row, candidate, scheduled=True):
-                    self.db.update(row['id'], status='queued', due=candidate)
+                if not policy.gate(row, candidate, scheduled=True):
+                    db.update(row['id'], status='queued', due=candidate)
                     placed = True
                     break
                 candidate += 60
             if not placed and draft.get('event') and now - draft['event']['as_of'] > self.s.draft_max_age:
-                self.db.update(row['id'], status='expired')
+                db.update(row['id'], status='expired')
 
     def due(self, now=None):
         now = utc() if now is None else now
