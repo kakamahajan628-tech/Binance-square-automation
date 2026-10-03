@@ -6,7 +6,10 @@ from .models import utc
 class PlanningStore:
     def __init__(self, store):
         self.store = store
-        self.states, self.queries, self.rows, self.changed = {}, {}, {}, {}
+        self.states = {}
+        self.queries = {}
+        self.rows = {}
+        self.changed = {}
 
     def state(self, key, default=None):
         if key not in self.states:
@@ -20,17 +23,43 @@ class PlanningStore:
 
     def list(self, kind, statuses=None, since=0, limit=500):
         key = kind, tuple(statuses or ()), since, min(limit, 10000)
+
         if key not in self.queries:
             records = self.store.list(kind, statuses, since, limit)
             self.queries[key] = {row['id']: row for row in records}
             self.rows.update(self.queries[key])
-        records = {**self.queries[key], **self.changed}
-        result = [row for row in records.values() if row['kind'] == kind and row['created'] >= since
-                  and (not statuses or row['status'] in statuses)]
-        return deepcopy(sorted(result, key=lambda row: row['created'], reverse=True)[:min(limit, 10000)])
 
-    def update(self, ident, *, status=None, payload=None, due=None, clear_due=False):
-        self.store.update(ident, status=status, payload=payload, due=due, clear_due=clear_due)
+        records = {**self.queries[key], **self.changed}
+        result = [
+            row for row in records.values()
+            if row['kind'] == kind
+            and row['created'] >= since
+            and (not statuses or row['status'] in statuses)
+        ]
+        return deepcopy(
+            sorted(
+                result,
+                key=lambda row: row['created'],
+                reverse=True,
+            )[:min(limit, 10000)]
+        )
+
+    def update(
+        self,
+        ident,
+        *,
+        status=None,
+        payload=None,
+        due=None,
+        clear_due=False,
+    ):
+        self.store.update(
+            ident,
+            status=status,
+            payload=payload,
+            due=due,
+            clear_due=clear_due,
+        )
         row = self.get(ident)
         if row:
             row['updated'] = utc()
