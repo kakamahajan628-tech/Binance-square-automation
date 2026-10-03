@@ -24,6 +24,8 @@ def rejection_message(error):
         'Invalid AI structure': 'AI JSON mein title/body text missing hai.',
         'AI output too large': 'AI output allowed size se bada hai.',
         'AI wrote unbound numerical claims': 'AI ne evidence tokens ke bina numbers likhe; quality validation ne draft roka.',
+        'AI numerical correction failed': 'AI ne ek correction attempt ke baad bhi unsupported numbers likhe; draft save/publish nahi hua.',
+        'AI evidence too large': 'AI evidence input allowed size se bada hai.',
         'Unknown fact token': 'AI ne unknown evidence token use kiya; quality validation ne draft roka.',
         'Same underlying event already covered': 'BTC ya selected symbol ka event pehle se covered hai. /queue aur /posts check karo; existing draft ID use karo.',
         'Draft too similar to recent content': 'Draft recent content jaisa hai. /queue aur /posts check karo; duplicate post blocked hai.',
