@@ -10,6 +10,21 @@ def rejection_message(error):
     # Only fixed application-owned messages may be exposed. Raw exceptions
     # can contain database credentials, provider URLs or administrator input.
     safe = {
+        'Daily AI request budget exhausted': 'Bot ka daily AI request budget khatam hai; DESK_AI_DAILY_REQUESTS check karo.',
+        'Daily AI token reservation exhausted': 'Bot ka daily AI token reservation budget khatam hai; DESK_AI_DAILY_TOKENS check karo.',
+        'AI request parameters rejected': 'AI provider ne request parameters reject kiye (HTTP 400); model aur JSON mode compatibility check karo.',
+        'AI authentication failed': 'AI API key accept nahi hui (HTTP 401); DESK_AI_KEY check karo.',
+        'AI access denied': 'AI provider ne access deny kiya (HTTP 403); account/model permissions check karo.',
+        'AI endpoint or model unavailable': 'AI endpoint ya model nahi mila (HTTP 404); DESK_AI_URL aur DESK_AI_MODEL check karo.',
+        'AI provider rate limit reached': 'AI provider ki rate limit lagi (HTTP 429); daily ya per-minute quota check karo, turant repeat mat karo.',
+        'AI output token limit reached': 'AI output token limit par ruk gaya; article/JSON incomplete hai. AI output budget ka code fix chahiye.',
+        'AI service rejected request': 'AI provider ne request reject ki; provider status check karo.',
+        'AI network request failed': 'AI request timeout ya network failure hua.',
+        'AI response unavailable or malformed': 'AI response valid JSON format mein nahi aaya.',
+        'Invalid AI structure': 'AI JSON mein title/body text missing hai.',
+        'AI output too large': 'AI output allowed size se bada hai.',
+        'AI wrote unbound numerical claims': 'AI ne evidence tokens ke bina numbers likhe; quality validation ne draft roka.',
+        'Unknown fact token': 'AI ne unknown evidence token use kiya; quality validation ne draft roka.',
         'Same underlying event already covered': 'BTC ya selected symbol ka event pehle se covered hai. /queue aur /posts check karo; existing draft ID use karo.',
         'Draft too similar to recent content': 'Draft recent content jaisa hai. /queue aur /posts check karo; duplicate post blocked hai.',
         'Unknown draft': 'Draft ID nahi mili. /queue se current database ki actual ID copy karo.',
