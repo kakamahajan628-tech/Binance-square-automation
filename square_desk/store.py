@@ -4,7 +4,9 @@ from pathlib import Path
 from threading import RLock
 import json
 import sqlite3
-from .models import utc, uid
+import base64
+import zlib
+from .models import utc, uid, digest
 
 
 SCHEMA = '''
@@ -82,7 +84,46 @@ class Store:
     def unpack(row):
         d = dict(row)
         d['payload'] = json.loads(d['payload'])
+        if d['kind'] == 'snapshot' and isinstance(d['payload'], dict) and '_snapshot_zlib' in d['payload']:
+            d['payload'] = json.loads(zlib.decompress(base64.b64decode(d['payload']['_snapshot_zlib'])))
         return d
+
+    def archive_snapshot(self, snapshot):
+        # One lossless snapshot per venue/symbol/interval/closed candle.
+        fingerprint = digest([snapshot['source'], snapshot['symbol'], snapshot['interval'], snapshot['candles'][-1]['end']])
+        payload = json.dumps({'_snapshot_zlib': base64.b64encode(zlib.compress(
+            json.dumps(snapshot, allow_nan=False).encode('utf-8'))).decode('ascii')})
+        now = utc()
+        with self.lock:
+            result = self.conn.execute('INSERT INTO entities VALUES (?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING',
+                (fingerprint, 'snapshot', 'observed', now, now, None, fingerprint, payload))
+        return result.rowcount == 1
+
+    def set_if_changed(self, key, value):
+        with self.lock:
+            self.conn.execute('INSERT INTO state VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE state.value<>excluded.value',
+                              (key, json.dumps(value, allow_nan=False)))
+
+    def release_lease(self, owner):
+        with self.transaction():
+            lease = self.state('worker_lease', {})
+            if lease.get('owner') == owner:
+                self.set('worker_lease', {'owner': owner, 'until': 0})
+
+    def storage_bytes(self):
+        with self.lock:
+            if self.postgres:
+                return int(self.conn.execute('SELECT pg_database_size(current_database()) AS bytes').fetchone()[0])
+            count = self.conn.execute('PRAGMA page_count').fetchone()[0]
+            size = self.conn.execute('PRAGMA page_size').fetchone()[0]
+            return count * size
+
+    def idle(self):
+        # Close the pooled client connection at the end of a saver batch. The
+        # transport reconnects on the next new operation, never retries a write.
+        if self.postgres:
+            with self.lock:
+                self.conn.close()
 
     def list(self, kind, statuses=None, since=0, limit=500):
         sql, args = 'SELECT * FROM entities WHERE kind=? AND created>=?', [kind, since]
@@ -155,10 +196,12 @@ class Store:
             self.set('worker_lease', {'owner': owner, 'until': utc() + seconds})
         return True
 
-    def prune(self, days):
+    def prune(self, days, snapshot_days=None):
         cutoff = utc() - days * 86400
         with self.lock:
-            self.conn.execute("DELETE FROM entities WHERE kind='snapshot' AND created<?", (cutoff,))
+            snapshot_cutoff = utc() - (snapshot_days if snapshot_days is not None else days) * 86400
+            self.conn.execute("DELETE FROM entities WHERE kind='snapshot' AND created<?", (snapshot_cutoff,))
+            self.conn.execute("DELETE FROM entities WHERE kind='outbox' AND status='delivered' AND created<?", (cutoff,))
             self.conn.execute('DELETE FROM audit WHERE at<?', (cutoff,))
             self.conn.execute('DELETE FROM budgets WHERE day<?', (__import__('datetime').datetime.fromtimestamp(cutoff, __import__('datetime').timezone.utc).date().isoformat(),))
 
