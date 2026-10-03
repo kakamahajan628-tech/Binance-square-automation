@@ -20,6 +20,7 @@ from .tracking import record_setup, advance
 from . import images
 from .derivatives import BinanceDerivatives
 from .news import NewsMonitor
+from .neon_runtime import MarketCache
 
 
 class Desk:
@@ -35,7 +36,10 @@ class Desk:
                                                  limits=httpx.Limits(max_connections=10, max_keepalive_connections=5))
         self.transport = Transport(self.client)
         types = {'binance': BinanceProvider, 'coinbase': CoinbaseProvider}
-        self.pool = ProviderPool([types[p](self.transport) for p in settings.providers], self.db, settings.candle_max_age)
+        self.batch_seconds = settings.neon_batch_seconds if self.db.postgres else 0
+        self.market_cache = MarketCache() if self.batch_seconds else None
+        self.pool = ProviderPool([types[p](self.transport) for p in settings.providers],
+                                 self.market_cache or self.db, settings.candle_max_age)
         self.derivatives = BinanceDerivatives(self.transport, self.db) if settings.enable_derivatives else None
         self.news = NewsMonitor(settings, self.db, self.client)
         ai = CompatibleAI(settings, self.db, self.client) if settings.ai_url and settings.ai_key and settings.ai_model else None
@@ -49,6 +53,8 @@ class Desk:
         self.owner = uid()
         self.task = None
         self.heartbeat_task = None
+        self.market_task = None
+        self.idle_until = 0
         self.stopping = False
         self.lease_owned = False
         for key, value in self.db.state('runtime_settings', {}).items():
@@ -62,8 +68,11 @@ class Desk:
                 'live_adapter_enabled': self.s.live_enabled, 'paused': self.db.state('paused', False),
                 'emergency_stop': self.db.state('emergency_stop', False),
                 'publisher_blocked': self.db.state('publisher_blocked', False),
-                'scheduler': ('running' if self.lease_owned else 'waiting_for_worker_lease')
+                'scheduler': ('running' if self.lease_owned else 'batch_idle' if self.idle_until > now else 'waiting_for_worker_lease')
                              if self.task and not self.task.done() else 'stopped',
+                'neon_batch_seconds': self.batch_seconds,
+                'next_database_batch': self.idle_until or None,
+                'database_storage': self.db.state('storage_usage', {}),
                 'last_scan': last, 'data_fresh': bool(last and now - last <= self.s.scan_seconds * 2),
                 'queue_size': len(self.db.list('draft', ['queued', 'approved', 'review'], limit=10000)),
                 'last_publication': self.db.state('last_publication'),
@@ -156,13 +165,15 @@ class Desk:
                     if slow and (slow.source != snap.source or slow.quote != snap.quote):
                         slow = None
                     snapshots[symbol] = snap
-                    self.db.insert('snapshot', snap.dict(), 'observed')
+                    self.db.archive_snapshot(snap.dict())
                     row = {'symbol': symbol, 'metrics': studies(snap), 'changes': changes(snap, slow)}
                     row['derivatives'] = await self.derivatives.context(symbol) if self.derivatives else None
                     rows.append(row)
                     advance(self.db, snap, self.s)
                 except (ProviderError, ValueError):
                     self.db.log('DATA', f'No fresh validated candles for {symbol}')
+            if self.market_cache:
+                self.market_cache.flush(self.db)
             if not rows:
                 self.telegram.notify('Market scan blocked: no fresh validated candles. Numerical publications are withheld.', key=f'data_fail:{int(utc() // 3600)}')
                 self.db.set('latest_market', [])
@@ -232,6 +243,11 @@ class Desk:
         self.db.set('last_weekly_report', key)
 
     async def cycle(self):
+        # Expired review drafts must not indefinitely block fresh content.
+        for row in self.db.list('draft', ['review', 'approved', 'queued']):
+            event = row['payload'].get('event')
+            if event and utc() - event['as_of'] > self.s.draft_max_age:
+                self.db.update(row['id'], status='expired', clear_due=True)
         await self.telegram.poll()
         self.campaigns.expire()
         await self.news.poll()
@@ -250,8 +266,16 @@ class Desk:
                     self.telegram.notify(f"Publication {row['id']}: {after['status']}", key='publish:' + row['id'])
         await self.telegram.flush()
         self.weekly()
-        self.db.prune(self.s.retention_days)
-        self.prune_artifacts()
+        if utc() - self.db.state('last_maintenance', 0) >= 3600:
+            self.db.prune(self.s.retention_days, self.s.snapshot_retention_days)
+            self.prune_artifacts()
+            size = self.db.storage_bytes()
+            self.db.set('storage_usage', {'postgres_database_bytes': size, 'checked_at': utc(),
+                                         'note': 'Database size only; Neon quota/history usage must be checked in Neon dashboard'})
+            if self.db.postgres and size >= 350_000_000:
+                self.telegram.notify('Database size exceeds 350 MB. Check Neon storage/compute quotas and backups; do not delete publication history.',
+                                     key='storage-warning:' + datetime.now(ZoneInfo(self.s.timezone)).date().isoformat())
+            self.db.set('last_maintenance', utc())
         self.db.set('last_cycle', utc())
 
     def prune_artifacts(self):
@@ -280,8 +304,35 @@ class Desk:
                 return
             await asyncio.sleep(30)
 
+    async def observe_market(self):
+        # Public API observations stay in RAM between durable batches. A restart
+        # discards only this cache; fresh source candles are fetched again.
+        while not self.stopping:
+            for symbol in self.s.symbols:
+                for interval in (900, 3600):
+                    try:
+                        await self.pool.fetch(symbol, interval)
+                    except (ProviderError, ValueError):
+                        pass
+            await asyncio.sleep(self.s.scan_seconds)
+
+    async def finish_batch(self):
+        if self.heartbeat_task:
+            self.heartbeat_task.cancel()
+            try:
+                await self.heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            self.heartbeat_task = None
+        try:
+            self.db.release_lease(self.owner)
+            self.db.idle()
+        finally:
+            self.lease_owned = False
+
     async def run(self):
         while not self.stopping:
+            batch_started = utc()
             try:
                 if not self.lease_owned:
                     self.lease_owned = self.db.acquire_lease(self.owner, 120)
@@ -297,12 +348,54 @@ class Desk:
                 raise
             except Exception as exc:
                 # Exception class only; network exception strings may hold keys.
-                self.db.log('ERROR', 'Worker cycle failed: ' + type(exc).__name__)
                 logging.getLogger('square_desk').error(json.dumps({'category': 'ERROR', 'at': utc(), 'correlation': self.owner, 'error_type': type(exc).__name__}))
-                self.telegram.notify('A worker cycle failed. Review /errors; publication safety checks remain active.', key=f'worker_error:{int(utc() // 3600)}')
-            await asyncio.sleep(10)
+                try:
+                    self.db.log('ERROR', 'Worker cycle failed: ' + type(exc).__name__)
+                    self.telegram.notify('A worker cycle failed. Review /errors; publication safety checks remain active.', key=f'worker_error:{int(utc() // 3600)}')
+                except Exception:
+                    # Database errors cannot themselves be recorded in an
+                    # unavailable database. The supervisor retries safely.
+                    raise
+            if self.batch_seconds:
+                await self.finish_batch()
+                # Keep at least ten minutes without background DB queries.
+                # Neon can scale to zero after its idle timeout. Interactive
+                # dashboard/webhook traffic can still wake the database.
+                delay = max(600, self.batch_seconds - (utc() - batch_started))
+                self.idle_until = utc() + delay
+                await asyncio.sleep(delay)
+                self.idle_until = 0
+            else:
+                await asyncio.sleep(10)
+
+    async def supervise(self):
+        while not self.stopping:
+            try:
+                await self.run()
+                return
+            except asyncio.CancelledError:
+                if self.stopping:
+                    raise
+                # Lease renewal failed: cancel the current cycle and retry only
+                # after a cooldown and fresh exclusive lease acquisition.
+                logging.getLogger('square_desk').warning('Worker interrupted; waiting before safe restart')
+            except Exception as exc:
+                logging.getLogger('square_desk').error('Worker unavailable: %s', type(exc).__name__)
+            self.lease_owned = False
+            if self.heartbeat_task:
+                self.heartbeat_task.cancel()
+                try:
+                    await self.heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+                self.heartbeat_task = None
+            delay = self.batch_seconds or 120
+            self.idle_until = utc() + delay
+            await asyncio.sleep(delay)
+            self.idle_until = 0
 
     async def start(self):
+        self.publisher.worker_owner = self.owner
         self.lease_owned = self.db.acquire_lease(self.owner, 120)
         if self.lease_owned:
             self.db.recover()
@@ -313,11 +406,13 @@ class Desk:
             # waiting; collection, Telegram polling and publishing stay idle.
             logging.getLogger('square_desk').info(
                 'Waiting for previous worker lease; HTTP ready, scheduler standby')
-        self.task = asyncio.create_task(self.run())
+        self.task = asyncio.create_task(self.supervise())
+        if self.market_cache:
+            self.market_task = asyncio.create_task(self.observe_market())
 
     async def close(self):
         self.stopping = True
-        for task in (self.task, self.heartbeat_task):
+        for task in (self.task, self.heartbeat_task, self.market_task):
             if task:
                 task.cancel()
                 try:
@@ -329,10 +424,7 @@ class Desk:
         try:
             # Checking owner and releasing must be one transaction so a retiring
             # instance cannot erase the successor's lease.
-            with self.db.transaction():
-                lease = self.db.state('worker_lease', {})
-                if lease.get('owner') == self.owner:
-                    self.db.set('worker_lease', {'owner': self.owner, 'until': 0})
+            self.db.release_lease(self.owner)
         finally:
             await self.client.aclose()
             self.db.close()
