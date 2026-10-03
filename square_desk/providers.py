@@ -105,7 +105,7 @@ class ProviderPool:
         # Five minute cache TTL; original observation timestamp is never rewritten.
         if cached and utc() - cached['fetched_at'] < 300:
             snap = Snapshot.read(cached)
-            snap.validate(utc(), self.max_age)
+            snap.validate(utc(), self.max_age if interval == 900 else max(self.max_age, interval + 300))
             return snap
         for provider in self.providers:
             try:
