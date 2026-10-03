@@ -78,8 +78,15 @@ class CompatibleAI:
                       {'role': 'user', 'content': input_text}], 'max_tokens': budget,
                       'response_format': {'type': 'json_object'}})
             if response.status_code != 200:
-                raise ValueError('AI service rejected request')
-            raw = json.loads(response.json()['choices'][0]['message']['content'])
+                reason = {400: 'AI request parameters rejected', 401: 'AI authentication failed',
+                          403: 'AI access denied', 404: 'AI endpoint or model unavailable',
+                          429: 'AI provider rate limit reached'}.get(response.status_code,
+                          'AI service rejected request')
+                raise ValueError(reason)
+            choice = response.json()['choices'][0]
+            if choice.get('finish_reason') == 'length':
+                raise ValueError('AI output token limit reached')
+            raw = json.loads(choice['message']['content'])
             if not isinstance(raw.get('title'), str) or not isinstance(raw.get('body'), str):
                 raise ValueError('Invalid AI structure')
             if len(raw['body']) > 20000 or len(raw['title']) > 180:
@@ -92,7 +99,9 @@ class CompatibleAI:
                 raw[key] = raw[key].replace('{{source}}', evidence['source']).replace('{{timestamp}}', evidence['timestamp'])
                 raw[key] = fill_tokens(raw[key], evidence)
             return raw
-        except (httpx.HTTPError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        except httpx.HTTPError:
+            raise ValueError('AI network request failed') from None
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError):
             raise ValueError('AI response unavailable or malformed') from None
 
 
