@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from typing import Protocol
 import asyncio
 import time
+import math
+import re
 import httpx
 from .models import Candle, Snapshot, utc
 
@@ -63,6 +65,38 @@ class BinanceProvider:
     def __init__(self, transport):
         self.http = transport
         self.metadata = None
+
+    async def liquid_symbols(self, limit, min_quote_volume):
+        metadata = await self.http.get(self.host, '/api/v3/exchangeInfo')
+        if not isinstance(metadata, dict) or 'rateLimits' not in metadata:
+            raise ProviderError('Missing official market metadata')
+        self.metadata = metadata
+        stable = {'USDT', 'USDC', 'FDUSD', 'TUSD', 'DAI', 'USDP', 'BUSD', 'USD1', 'USDE', 'EUR', 'AEUR', 'EURI'}
+        eligible = {}
+        for pair in metadata.get('symbols', []):
+            base = pair.get('baseAsset', '')
+            if (pair.get('quoteAsset') == 'USDT' and pair.get('status') == 'TRADING'
+                    and pair.get('isSpotTradingAllowed', False) and base not in stable
+                    and re.fullmatch(r'[A-Z0-9]{2,12}', base)
+                    and not base.endswith(('UP', 'DOWN', 'BULL', 'BEAR'))):
+                eligible[pair['symbol']] = base
+        tickers = await self.http.get(self.host, '/api/v3/ticker/24hr', {'type': 'MINI'})
+        if not isinstance(tickers, list):
+            raise ProviderError('Invalid market discovery response')
+        ranked = []
+        for ticker in tickers:
+            base = eligible.get(ticker.get('symbol'))
+            try:
+                volume = float(ticker.get('quoteVolume', 0))
+            except (TypeError, ValueError):
+                continue
+            if base and math.isfinite(volume) and volume >= min_quote_volume:
+                ranked.append((volume, base))
+        ranked.sort(reverse=True)
+        symbols = [base for _, base in ranked[:limit]]
+        if not symbols:
+            raise ProviderError('No liquid spot symbols discovered')
+        return symbols
 
     async def candles(self, symbol, interval):
         if self.metadata is None:
