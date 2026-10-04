@@ -32,7 +32,7 @@ async function refresh() {
     $('drafts').replaceChildren();
     for (const row of data.drafts) {
       const article=document.createElement('article'), title=document.createElement('h3'), meta=document.createElement('small'), body=document.createElement('p');
-      title.textContent=row.payload.title; meta.textContent=`${row.status} · ${row.payload.risk} risk · ${row.id}`;body.textContent=row.payload.body;
+      title.textContent=row.payload.title; meta.textContent=`${row.status} · ${row.payload.generated_by || 'built-in/manual'} · ${row.payload.body.split(/\s+/).filter(Boolean).length} words · ${row.payload.risk} risk · ${row.id}`;body.textContent=row.payload.body;
       article.append(title,meta,body);
       if(row.payload.image){const a=document.createElement('a');a.href='/artifacts/'+encodeURIComponent(row.payload.image);a.textContent='Preview chart';a.target='_blank';article.append(a);}
       if(['review','approved','queued'].includes(row.status)) {
