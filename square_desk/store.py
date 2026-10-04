@@ -172,6 +172,13 @@ class Store:
                               (day, category, used + amount))
         return True
 
+    def release_budget(self, day, category, amount):
+        if type(amount) is not int or amount < 0:
+            raise ValueError('Invalid budget release')
+        with self.transaction():
+            self.conn.execute('UPDATE budgets SET used=CASE WHEN used>=? THEN used-? ELSE 0 END WHERE day=? AND category=?',
+                              (amount, amount, day, category))
+
     def log(self, category, message, correlation='system'):
         # Messages supplied by our code, not raw HTTP exceptions containing tokens or bodies.
         with self.lock:
