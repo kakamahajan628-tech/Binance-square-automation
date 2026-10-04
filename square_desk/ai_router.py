@@ -3,6 +3,7 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
 import json
+import re
 import time
 from urllib.parse import quote, urlsplit
 
@@ -10,6 +11,22 @@ import httpx
 
 from .content import CompatibleAI, AIRequestError, FactChecker
 from .models import utc
+
+
+def validation_reason(error):
+    """Allow only application-owned diagnostics; never persist draft text."""
+    reason = str(error)
+    fixed = {
+        'AI wrote unbound numerical claims', 'AI numerical correction failed',
+        'Unknown fact token', 'Invalid AI structure', 'AI output too large',
+        'AI response unavailable or malformed', 'AI output token limit reached',
+        'AI evidence too large', 'Prohibited promotion or unsupported profit language',
+        'Invalid formatting', 'Control characters are not permitted',
+        'Word count outside configured limits', 'Missing source or timestamp',
+        'Missing relevant ticker'}
+    if reason in fixed or re.fullmatch(r'AI body word count \d+; required \d+-\d+', reason):
+        return reason
+    return 'Output failed generation validation'
 
 
 class GoogleClient:
@@ -167,7 +184,7 @@ class AIRouter:
                         raise
                     # Only fixed reason/type, never the rejected output, is
                     # retained. Every backup passes the identical validator.
-                    self.mark(name, 'validation_failed', 'Output failed generation validation', 300)
+                    self.mark(name, 'validation_failed', validation_reason(error), 300)
                     self.db.log('AI', name + ': invalid output; trying next configured provider')
                     continue
                 self.mark(name, 'ok')
