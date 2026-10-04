@@ -169,8 +169,8 @@ class Settings:
             raise ValueError('OpenRouter fallback must use a free-only model')
         if self.kilo_enabled and not (self.kilo_model == 'kilo-auto/free' or self.kilo_model.endswith(':free')):
             raise ValueError('Kilo fallback must use a free-only model')
-        if self.google_api_key and self.google_model not in ('gemma-4-31b-it', 'gemma-4-26b-a4b-it'):
-            raise ValueError('Google free fallback must use a supported hosted Gemma 4 model')
+        if self.google_api_key and self.google_model not in ('gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemini-3-flash-preview'):
+            raise ValueError('Google model must be a supported hosted Gemma 4 or Gemini 3 Flash model')
         for name in ('cerebras_model', 'google_model', 'openrouter_model', 'mistral_model', 'cloudflare_model', 'kilo_model', 'nvidia_model', 'cohere_model'):
             model = getattr(self, name)
             if len(model) > 160 or any(ord(c) < 32 for c in model):
