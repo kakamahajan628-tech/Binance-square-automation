@@ -80,13 +80,13 @@ class CompatibleAI:
         self.request_lock = asyncio.Lock()
         self.next_request_at = 0
 
-    async def _send(self, request, article):
+    async def _send(self, request, article, timeout=90):
         async with self.request_lock:
             if urlsplit(self.s.ai_url).hostname == 'api.groq.com':
                 await asyncio.sleep(max(0, self.next_request_at - time.monotonic()))
                 self.next_request_at = time.monotonic() + (61 if article else 20)
             return await self.client.post(self.s.ai_url,
-                headers={'Authorization': 'Bearer ' + self.s.ai_key}, json=request, timeout=90)
+                headers={'Authorization': 'Bearer ' + self.s.ai_key}, json=request, timeout=timeout)
 
     async def generate(self, evidence, article=False):
         try:
