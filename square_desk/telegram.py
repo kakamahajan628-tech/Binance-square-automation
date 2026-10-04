@@ -56,7 +56,7 @@ def rejection_message(error):
 
 
 HELP = '''Square Desk controls
-/status /dashboard /queue /next /today /posts /articles
+/status /auto /approval /universe /dashboard /queue /next /today /posts /articles
 /movers [15m|1h|4h|12h|24h|3d|7d] /gainers /losers /signals /alerts
 /scan /education /post_now SYMBOL /article_now SYMBOL /image_now ID
 /preview ID /approve ID /reject ID /edit ID Title|Body
@@ -87,12 +87,25 @@ class Telegram:
     def notify(self, text, key=None):
         if not self.s.telegram_token:
             return
+        # Articles and previews must not be silently truncated to one message.
+        chunks, chars, units = [], [], 0
+        for char in text[:100000]:
+            size = 2 if ord(char) > 0xffff else 1
+            if units + size > 3500:
+                chunks.append(''.join(chars))
+                chars, units = [], 0
+            chars.append(char)
+            units += size
+        if chars:
+            chunks.append(''.join(chars))
         for admin in self.s.telegram_admins:
-            try:
-                self.db.insert('outbox', {'chat_id': admin, 'text': text[:3900]},
-                               fingerprint=f'{admin}:{key}' if key else None)
-            except sqlite3.IntegrityError:
-                pass
+            for index, chunk in enumerate(chunks):
+                try:
+                    label = f'[{index+1}/{len(chunks)}]\n' if len(chunks) > 1 else ''
+                    self.db.insert('outbox', {'chat_id': admin, 'text': label + chunk},
+                                   fingerprint=f'{admin}:{key}:{index}' if key else None)
+                except sqlite3.IntegrityError:
+                    pass
 
     async def api(self, method, body):
         try:
@@ -199,6 +212,22 @@ class Telegram:
             return HELP
         if command in ('/status', '/dashboard'):
             return json.dumps(self.desk.status(), indent=2)
+        if command in ('/auto', '/approval'):
+            values = self.db.state('runtime_settings', {})
+            values.update(mode='automatic' if command == '/auto' else 'approval',
+                          ai_auto_publish=command == '/auto')
+            self.db.set('runtime_settings', values)
+            self.s.mode, self.s.ai_auto_publish = values['mode'], values['ai_auto_publish']
+            self.db.log('SECURITY', 'Publication mode changed: ' + self.s.mode)
+            return ('Automatic mode enabled for new validated medium-risk text drafts. '
+                    'Daily/hourly caps, pause, freshness, duplicate and live gates remain active. '
+                    'High-risk, edited, campaign and image drafts still require review.' if command == '/auto'
+                    else 'Approval mode enabled; new drafts require approval.')
+        if command == '/universe':
+            await self.desk.refresh_universe()
+            return json.dumps({'mode': self.s.market_universe, 'status': self.desk.universe_state,
+                               'selected_count': len(self.desk.universe), 'symbols': self.desk.universe,
+                               'scan_batch_size': self.s.scan_batch_size}, indent=2)
         if command in ('/queue', '/next', '/schedule'):
             rows = self.db.list('draft', ['review', 'approved', 'queued'])
             return '\n'.join(f"{r['id']} {r['status']} {r['payload']['title']}" for r in rows[:20]) or 'Queue empty'
@@ -242,7 +271,8 @@ class Telegram:
             return f'Draft {ident} created. Review with /preview {ident}; publishing limits still apply.'
         if command == '/preview':
             row = self.desk.get_draft(arg)
-            return f"{row['id']} [{row['status']}]\n{row['payload']['title']}\n\n{row['payload']['body']}"
+            p = row['payload']
+            return f"{row['id']} [{row['status']}] [{p.get('generated_by', 'built-in/manual')}] {len(p['body'].split())} words\n{p['title']}\n\n{p['body']}"
         if command in ('/approve', '/reject', '/delete_queue'):
             self.desk.review(arg, command == '/approve')
             return 'Draft approved for scheduling.' if command == '/approve' else 'Draft rejected and retained in audit history.'
