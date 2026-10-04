@@ -1,5 +1,7 @@
 """Allowlisted controls, durable update deduplication, bounded retries and private delivery."""
 import json
+import asyncio
+import logging
 import re
 import sqlite3
 import httpx
@@ -27,6 +29,7 @@ def rejection_message(error):
         'AI request timed out': 'AI response timeout hua; provider cooldown aur backup /ai_status mein dekho.',
         'AI connection failed': 'AI provider se connection nahi bana; provider cooldown aur backup /ai_status mein dekho.',
         'AI network protocol failed': 'AI provider connection incomplete hua; provider cooldown aur backup /ai_status mein dekho.',
+        'AI response read failed': 'AI provider ka response read nahi ho paya; /ai_status mein cooldown aur backup dekho.',
         'AI response unavailable or malformed': 'AI response valid JSON format mein nahi aaya.',
         'Invalid AI structure': 'AI JSON mein title/body text missing hai.',
         'AI output too large': 'AI output allowed size se bada hai.',
@@ -82,6 +85,8 @@ Paper mode is default. Live trading is never supported.'''
 class Telegram:
     def __init__(self, settings, store, desk, client):
         self.s, self.db, self.desk, self.client = settings, store, desk, client
+        self.job_task = None
+        self.flush_lock = asyncio.Lock()
 
     def authorized(self, message):
         # Only private chats, with both sender and destination matching an admin.
@@ -132,6 +137,10 @@ class Telegram:
             return None
 
     async def flush(self):
+        async with self.flush_lock:
+            await self._flush()
+
+    async def _flush(self):
         if not self.s.telegram_token or utc() < self.db.state('telegram_retry_after', 0):
             return
         for row in reversed(self.db.list('outbox', ['pending'], limit=10)):
@@ -195,6 +204,23 @@ class Telegram:
                 return
             rate['count'] += 1
             self.db.set(rate_key, rate)
+        text = str(message.get('text', ''))
+        name = text.strip().split(maxsplit=1)[0].split('@')[0].lower() if text.strip() else ''
+        # Only generation jobs are detached, with one bounded slot. Fast safety
+        # commands remain responsive while AI waits for a provider or pacing.
+        if name in ('/post_now', '/article_now', '/regenerate', '/project_draft', '/news_draft') and not getattr(self.desk, 'batch_seconds', 0):
+            if self.job_task and not self.job_task.done():
+                self.db.update(command_id, status='rejected')
+                self.notify('Ek AI command abhi processing mein hai. Uska result aane do; /status aur /ai_status available hain.',
+                            key='command:' + str(update['update_id']))
+            else:
+                self.notify('Command received. AI draft processing shuru ho rahi hai; result alag message mein aayega. Command repeat mat karo.',
+                            key='command-start:' + str(update['update_id']))
+                self.job_task = asyncio.create_task(self._background_command(text, command_id, update['update_id']))
+            if callback:
+                await self.api('answerCallbackQuery', {'callback_query_id': callback['id']})
+            await self.flush()
+            return
         # Commands are at-most-once on crash; the administrator can inspect state
         # and issue a new update. Raw pasted credentials are never logged/stored.
         try:
@@ -207,6 +233,36 @@ class Telegram:
         self.notify(result, key='command:' + str(update['update_id']))
         if callback:
             await self.api('answerCallbackQuery', {'callback_query_id': callback['id']})
+        await self.flush()
+
+    async def _background_command(self, text, command_id, update_id):
+        try:
+            try:
+                result = await self.command(text)
+                self.db.update(command_id, status='applied')
+            except (ValueError, KeyError, TypeError, sqlite3.IntegrityError) as error:
+                result = rejection_message(error)
+                self.db.update(command_id, status='rejected')
+                self.db.log('TELEGRAM', result)
+            except Exception as error:
+                self.db.update(command_id, status='rejected')
+                self.db.log('ERROR', 'Telegram generation failed: ' + type(error).__name__)
+                result = 'AI command failed. /errors aur /ai_status check karo; draft success confirm nahi hua.'
+            self.notify(result, key='command:' + str(update_id))
+            await self.flush()
+        except asyncio.CancelledError:
+            # No automatic replay after a lease loss or restart.
+            raise
+        except Exception as error:
+            logging.getLogger('square_desk').error('Telegram job unavailable: %s', type(error).__name__)
+
+    async def stop_job(self):
+        if self.job_task and not self.job_task.done():
+            self.job_task.cancel()
+            try:
+                await self.job_task
+            except asyncio.CancelledError:
+                pass
 
     async def command(self, text):
         if len(text) > 20000:
