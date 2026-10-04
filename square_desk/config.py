@@ -20,6 +20,11 @@ class Settings:
     timezone: str = 'Asia/Kolkata'
     paper_mode: bool = True
     mode: str = 'approval'
+    ai_auto_publish: bool = False
+    auto_articles: bool = False
+    market_universe: str = 'watchlist'
+    universe_limit: int = 100
+    scan_batch_size: int = 25
     admin_token: str = field(default='', repr=False)
     telegram_token: str = field(default='', repr=False)
     telegram_admins: tuple[int, ...] = ()
@@ -104,6 +109,10 @@ class Settings:
         ZoneInfo(self.timezone)
         if self.mode not in ('automatic', 'approval', 'hybrid'):
             raise ValueError('Invalid publication mode')
+        if self.market_universe not in ('watchlist', 'top_liquid'):
+            raise ValueError('Market universe must be watchlist or top_liquid')
+        if not 10 <= self.universe_limit <= 200 or not 5 <= self.scan_batch_size <= 50:
+            raise ValueError('Universe limit must be 10..200 and scan batch size 5..50')
         if not self.providers or any(x not in ('binance', 'coinbase') for x in self.providers):
             raise ValueError('Supported market providers: binance,coinbase')
         if not 1 <= len(self.symbols) <= 30 or any(not re.fullmatch(r'[A-Z0-9]{2,12}', x) for x in self.symbols):
