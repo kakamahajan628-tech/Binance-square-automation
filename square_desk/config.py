@@ -62,6 +62,26 @@ class Settings:
     ai_model: str = ''
     ai_daily_requests: int = 30
     ai_daily_tokens: int = 40000
+    ai_provider_order: tuple[str, ...] = ('groq', 'cerebras', 'google', 'openrouter', 'mistral', 'cloudflare', 'kilo')
+    ai_max_provider_attempts: int = 4
+    cerebras_api_key: str = field(default='', repr=False)
+    cerebras_model: str = 'gpt-oss-120b'
+    google_api_key: str = field(default='', repr=False)
+    google_model: str = 'gemma-4-31b-it'
+    openrouter_api_key: str = field(default='', repr=False)
+    openrouter_model: str = 'openrouter/free'
+    mistral_api_key: str = field(default='', repr=False)
+    mistral_model: str = 'mistral-small-latest'
+    cloudflare_api_token: str = field(default='', repr=False)
+    cloudflare_account_id: str = field(default='', repr=False)
+    cloudflare_model: str = ''
+    kilo_enabled: bool = False
+    kilo_api_key: str = field(default='', repr=False)
+    kilo_model: str = 'kilo-auto/free'
+    nvidia_api_key: str = field(default='', repr=False)
+    nvidia_model: str = ''
+    cohere_api_key: str = field(default='', repr=False)
+    cohere_model: str = ''
     similarity_threshold: float = .78
     fee_bps: float = 10
     slippage_bps: float = 5
@@ -139,6 +159,24 @@ class Settings:
             raise ValueError('Invalid weekly report time')
         if self.ai_url and not self.ai_url.startswith('https://'):
             raise ValueError('AI endpoint must use HTTPS')
+        names = {'primary', 'groq', 'cerebras', 'google', 'openrouter', 'mistral', 'cloudflare', 'kilo', 'nvidia', 'cohere'}
+        if (not self.ai_provider_order or any(p not in names for p in self.ai_provider_order)
+                or len(set(self.ai_provider_order)) != len(self.ai_provider_order)):
+            raise ValueError('Invalid AI provider order')
+        if not 1 <= self.ai_max_provider_attempts <= 10 or self.ai_daily_requests <= 0 or self.ai_daily_tokens <= 0:
+            raise ValueError('AI budgets must be positive and provider attempts 1..10')
+        if self.openrouter_api_key and not (self.openrouter_model == 'openrouter/free' or self.openrouter_model.endswith(':free')):
+            raise ValueError('OpenRouter fallback must use a free-only model')
+        if self.kilo_enabled and not (self.kilo_model == 'kilo-auto/free' or self.kilo_model.endswith(':free')):
+            raise ValueError('Kilo fallback must use a free-only model')
+        if self.google_api_key and self.google_model not in ('gemma-4-31b-it', 'gemma-4-26b-a4b-it'):
+            raise ValueError('Google free fallback must use a supported hosted Gemma 4 model')
+        for name in ('cerebras_model', 'google_model', 'openrouter_model', 'mistral_model', 'cloudflare_model', 'kilo_model', 'nvidia_model', 'cohere_model'):
+            model = getattr(self, name)
+            if len(model) > 160 or any(ord(c) < 32 for c in model):
+                raise ValueError('Invalid AI model ID')
+        if self.cloudflare_account_id and not re.fullmatch(r'[a-fA-F0-9]{32}', self.cloudflare_account_id):
+            raise ValueError('Cloudflare account ID must be 32 hexadecimal characters')
         if len(self.news_feeds) > 10 or any(not url.startswith('https://') for url in self.news_feeds):
             raise ValueError('Use at most ten HTTPS official RSS feeds')
         if self.telegram_token and (not self.telegram_admins or not self.webhook_secret):
@@ -192,6 +230,7 @@ class Settings:
 
     def public(self):
         excluded = {'database', 'admin_token', 'telegram_token', 'webhook_secret', 'square_key', 'ai_key', 'ai_url', 'news_feeds'}
+        excluded.update(name for name, value in self.__dataclass_fields__.items() if not value.repr)
         return {**{k: v for k, v in asdict(self).items() if k not in excluded},
                 'database_backend': 'postgresql' if self.database.startswith(('postgresql://', 'postgres://')) else 'sqlite',
                 'news_feed_count': len(self.news_feeds)}
