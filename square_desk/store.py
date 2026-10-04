@@ -172,6 +172,11 @@ class Store:
                               (day, category, used + amount))
         return True
 
+    def budget_used(self, day, category):
+        with self.lock:
+            row = self.conn.execute('SELECT used FROM budgets WHERE day=? AND category=?', (day, category)).fetchone()
+            return row[0] if row else 0
+
     def release_budget(self, day, category, amount):
         if type(amount) is not int or amount < 0:
             raise ValueError('Invalid budget release')
