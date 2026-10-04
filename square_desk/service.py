@@ -15,7 +15,8 @@ from .campaigns import CampaignManager
 from .analytics import Analytics
 from .scheduler import Scheduler
 from .publisher import PublicationService
-from .telegram import Telegram
+from .telegram import Telegram, rejection_message
+from .compliance import PUBLICATION_STATES
 from .tracking import record_setup, advance
 from . import images
 from .derivatives import BinanceDerivatives
@@ -50,6 +51,10 @@ class Desk:
         self.publisher = PublicationService(settings, self.db, self.content.checker, self.client)
         self.telegram = Telegram(settings, self.db, self, self.client)
         self.scan_lock = asyncio.Lock()
+        self.universe = list(settings.symbols)
+        self.universe_checked_at = 0
+        self.scan_cursor = 0
+        self.universe_state = 'watchlist'
         self.owner = uid()
         self.task = None
         self.heartbeat_task = None
@@ -58,7 +63,7 @@ class Desk:
         self.stopping = False
         self.lease_owned = False
         for key, value in self.db.state('runtime_settings', {}).items():
-            if key in ('daily_target', 'hourly_cap', 'gap_seconds'):
+            if key in ('daily_target', 'hourly_cap', 'gap_seconds', 'mode', 'ai_auto_publish'):
                 setattr(settings, key, value)
 
     def status(self):
@@ -82,7 +87,43 @@ class Desk:
                 'error_count_recent': sum(r['category'] == 'ERROR' for r in self.db.logs(100)),
                 'missing_integrations': ['on_chain', 'liquidation_feed', 'automatic_account_metrics'],
                 'derivatives': 'enabled' if self.derivatives else 'disabled',
-                'market_universe': 'configured watchlist, not every listed asset'}
+                'market_universe': {'mode': self.s.market_universe, 'status': self.universe_state,
+                                    'selected_count': len(self.universe), 'symbols': self.universe,
+                                    'scan_batch_size': self.s.scan_batch_size},
+                'ai': {'configured': self.content.ai is not None, 'model': self.s.ai_model,
+                       'automatic_validated_posts': self.s.mode == 'automatic' and self.s.ai_auto_publish,
+                       'last_generation': self.db.state('last_ai_generation', {})}}
+
+    async def refresh_universe(self):
+        if self.s.market_universe == 'watchlist':
+            self.universe = list(self.s.symbols)
+            return
+        if utc() - self.universe_checked_at < 3600:
+            return
+        self.universe_checked_at = utc()
+        for provider in self.pool.providers:
+            if not hasattr(provider, 'liquid_symbols'):
+                continue
+            try:
+                self.universe = await provider.liquid_symbols(self.s.universe_limit,
+                                                             max(1_000_000, self.s.min_quote_volume))
+                self.universe_state = 'discovered'
+                self.db.set('market_universe', {'symbols': self.universe, 'at': utc(), 'source': provider.name})
+                return
+            except (ProviderError, ValueError, KeyError, TypeError):
+                pass
+        self.universe_state = 'discovery_unavailable_using_previous_or_watchlist'
+
+    def scan_symbols(self):
+        if self.s.market_universe == 'watchlist':
+            return self.universe
+        anchors = [symbol for symbol in ('BTC', 'ETH') if symbol in self.universe]
+        others = [symbol for symbol in self.universe if symbol not in anchors]
+        size = min(len(others), self.s.scan_batch_size - len(anchors))
+        batch = [others[(self.scan_cursor + i) % len(others)] for i in range(size)] if others else []
+        if others:
+            self.scan_cursor = (self.scan_cursor + size) % len(others)
+        return anchors + batch
 
     def get_draft(self, ident):
         row = self.db.get(ident)
@@ -118,13 +159,14 @@ class Desk:
         self.db.log('CONTENT', 'Edited draft; approval invalidated', ident)
 
     async def create_for_symbol(self, symbol, article=False):
-        if symbol not in self.s.symbols:
+        await self.refresh_universe()
+        if symbol not in self.universe and symbol not in self.s.symbols:
             raise ValueError('Symbol must be on configured watchlist')
         snap = await self.pool.fetch(symbol)
         m = studies(snap)
         event = {'symbol': symbol, 'category': 'mover', 'priority': 40, 'angle': 'scenario',
                  'metrics': m, 'changes': changes(snap), 'as_of': snap.as_of,
-                 'event_key': f'{symbol}:manual:{int(snap.as_of // 14400)}'}
+                 'event_key': f'{symbol}:manual:{"article" if article else "post"}:{int(snap.as_of // 14400)}'}
         return await self.content.draft(event, article)
 
     def make_image(self, ident):
@@ -154,8 +196,9 @@ class Desk:
 
     async def scan(self):
         async with self.scan_lock:
+            await self.refresh_universe()
             rows, snapshots = [], {}
-            for symbol in self.s.symbols:
+            for symbol in self.scan_symbols():
                 try:
                     snap = await self.pool.fetch(symbol)
                     try:
@@ -178,7 +221,11 @@ class Desk:
                 self.telegram.notify('Market scan blocked: no fresh validated candles. Numerical publications are withheld.', key=f'data_fail:{int(utc() // 3600)}')
                 self.db.set('latest_market', [])
                 return
-            self.db.set('latest_market', rows)
+            previous = self.db.state('latest_market', []) if self.s.market_universe == 'top_liquid' else []
+            current = {r['symbol']: r for r in previous if r['symbol'] in self.universe
+                       and 0 <= utc() - r['metrics']['as_of'] <= self.s.candle_max_age}
+            current.update({r['symbol']: r for r in rows})
+            self.db.set('latest_market', list(current.values()))
             self.db.set('last_scan', utc())
             context = regime(rows)
             self.db.set('regime', context)
@@ -203,11 +250,39 @@ class Desk:
             weights = self.db.state('category_weights', {})
             candidates.sort(key=lambda e: -(e['priority'] * weights.get(e['category'], 1)))
             created = 0
+            attempted = 0
             for event in candidates:
-                if created >= self.s.max_drafts_per_scan or len(self.db.list('draft', ['review', 'approved', 'queued'])) >= 50:
+                if attempted >= self.s.max_drafts_per_scan or len(self.db.list('draft', ['review', 'approved', 'queued'])) >= 50:
                     break
+                published = self.db.list('draft', PUBLICATION_STATES, limit=10000)
+                start, hour = self.publisher.policy.window(utc())
+                total_today = sum(self.publisher.policy.window(r['payload'].get('submitted_at', r['updated']))[0] == start for r in published)
+                pending = len(self.db.list('draft', ['approved', 'queued'] if self.s.mode == 'automatic' else ['approved', 'queued', 'review']))
+                if total_today >= self.publisher.policy.caps()['daily'] or pending >= self.s.max_drafts_per_scan:
+                    break
+                if self.s.mode == 'automatic' and self.s.ai_auto_publish:
+                    if hour not in self.s.publishing_hours or event['category'] in ('shock', 'setup'):
+                        continue
+                    gap = self.publisher.policy.caps()['gap']
+                    if utc() - self.db.state('last_auto_draft', 0) < gap:
+                        break
+                article = False
+                if self.s.auto_articles and self.s.mode == 'automatic' and self.s.ai_auto_publish and self.content.ai:
+                    expected = min(self.s.article_daily_cap, int(hour >= 10) + int(hour >= 18))
+                    related = published + self.db.list('draft', ['approved', 'queued', 'review'])
+                    articles_today = sum(r['payload'].get('article', False)
+                                         and self.publisher.policy.window(r['payload'].get('submitted_at', r['created']))[0] == start
+                                         for r in related)
+                    article = articles_today < expected
+                if article:
+                    event = {**event, 'event_key': event['event_key'] + ':article'}
+                if any(r['status'] not in ('expired', 'rejected')
+                       and (r['payload'].get('event') or {}).get('event_key') == event['event_key']
+                       for r in self.db.list('draft', since=utc() - 7*86400, limit=10000)):
+                    continue
+                attempted += 1
                 try:
-                    ident = await self.content.draft(event)
+                    ident = await self.content.draft(event, article=article)
                     # Generate real charts only for useful events. Text-only live
                     # publishing can be used without requiring a media adapter.
                     if event['category'] in ('volume', 'shock') and (self.s.paper_mode or not self.s.live_enabled):
@@ -216,12 +291,15 @@ class Desk:
                         except (ValueError, OSError):
                             self.db.log('IMAGE', 'Image omitted: budget, evidence or rendering failure', ident)
                     row = self.db.get(ident)
-                    self.telegram.notify(f"Draft {ident} [{row['status']}]\n{row['payload']['title']}\n\n{row['payload']['body']}\n\n/approve {ident}\n/reject {ident}", key='draft:' + ident)
+                    controls = f'\n\n/approve {ident}\n/reject {ident}' if row['status'] == 'review' else '\nValidated draft scheduled automatically.'
+                    self.telegram.notify(f"Draft {ident} [{row['status']}] [{row['payload']['generated_by']}]\n{row['payload']['title']}\n\n{row['payload']['body']}" + controls, key='draft:' + ident)
+                    if row['status'] == 'approved' and self.s.mode == 'automatic':
+                        self.db.set('last_auto_draft', utc())
                     created += 1
-                except (ValueError, sqlite3.IntegrityError):
-                    self.db.log('CONTENT', 'Candidate filtered by evidence, similarity or validation')
+                except (ValueError, sqlite3.IntegrityError) as error:
+                    self.db.log('CONTENT', rejection_message(error))
             day = datetime.now(ZoneInfo(self.s.timezone)).date().isoformat()
-            if created == 0 and self.db.state('last_education_day') != day:
+            if created == 0 and self.content.ai is None and self.db.state('last_education_day') != day:
                 ident = self.content.education()
                 if ident:
                     self.db.set('last_education_day', day)
@@ -308,6 +386,8 @@ class Desk:
         # Public API observations stay in RAM between durable batches. A restart
         # discards only this cache; fresh source candles are fetched again.
         while not self.stopping:
+            # Only warm configured anchors; rotating discovery is done in a
+            # durable scan rather than fetching the entire universe twice.
             for symbol in self.s.symbols:
                 for interval in (900, 3600):
                     try:
