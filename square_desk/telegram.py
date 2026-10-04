@@ -66,7 +66,7 @@ def rejection_message(error):
 
 
 HELP = '''Square Desk controls
-/status /ai_status /ai_retry PROVIDER /auto /approval /universe /dashboard /queue /next /today /posts /articles
+/status /ai_status /ai_test PROVIDER /ai_retry PROVIDER /auto /approval /universe /dashboard /queue /next /today /posts /articles
 /movers [15m|1h|4h|12h|24h|3d|7d] /gainers /losers /signals /alerts
 /scan /education /post_now SYMBOL /article_now SYMBOL /image_now ID
 /preview ID /approve ID /reject ID /edit ID Title|Body
@@ -208,7 +208,7 @@ class Telegram:
         name = text.strip().split(maxsplit=1)[0].split('@')[0].lower() if text.strip() else ''
         # Only generation jobs are detached, with one bounded slot. Fast safety
         # commands remain responsive while AI waits for a provider or pacing.
-        if name in ('/post_now', '/article_now', '/regenerate', '/project_draft', '/news_draft') and not getattr(self.desk, 'batch_seconds', 0):
+        if name in ('/post_now', '/article_now', '/regenerate', '/project_draft', '/news_draft', '/ai_test') and not getattr(self.desk, 'batch_seconds', 0):
             if self.job_task and not self.job_task.done():
                 self.db.update(command_id, status='rejected')
                 self.notify('Ek AI command abhi processing mein hai. Uska result aane do; /status aur /ai_status available hain.',
@@ -278,6 +278,11 @@ class Telegram:
         if command == '/ai_status':
             ai = self.desk.content.ai
             return json.dumps(ai.status() if ai and hasattr(ai, 'status') else {'configured': ai is not None}, indent=2)
+        if command == '/ai_test':
+            ai = self.desk.content.ai
+            if not ai or not hasattr(ai, 'test'):
+                raise ValueError('Unknown AI provider')
+            return json.dumps(await ai.test(arg.lower()), indent=2)
         if command == '/ai_retry':
             ai = self.desk.content.ai
             if not ai or not hasattr(ai, 'providers') or arg not in ai.providers:
