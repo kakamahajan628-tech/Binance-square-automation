@@ -81,14 +81,14 @@ class PacedAI(CompatibleAI):
         super().__init__(settings, store, client)
         self.spacing = spacing
 
-    async def _send(self, request, article):
+    async def _send(self, request, article, timeout=90):
         if urlsplit(self.s.ai_url).hostname == 'api.groq.com':
-            return await super()._send(request, article)
+            return await super()._send(request, article, timeout=timeout)
         async with self.request_lock:
             await asyncio.sleep(max(0, self.next_request_at - time.monotonic()))
             self.next_request_at = time.monotonic() + self.spacing
             return await self.client.post(self.s.ai_url, headers={'Authorization': 'Bearer ' + self.s.ai_key},
-                                          json=request, timeout=90)
+                                          json=request, timeout=timeout)
 
 
 class AIRouter:
@@ -131,6 +131,7 @@ class AIRouter:
         day = datetime.now(timezone.utc).date().isoformat()
         states = self.db.state('ai_provider_health', {})
         return {'configured': bool(self.providers), 'configured_order': list(self.providers),
+                'implementation_revision': '2026-10-04-ai-probe-1',
                 'max_provider_attempts_per_draft': self.s.ai_max_provider_attempts,
                 'budget_day_utc': day,
                 'global_budget': {
@@ -139,7 +140,101 @@ class AIRouter:
                 'providers': {name: {'model': provider.s.ai_model, **states.get(name, {}),
                                     'cooldown_remaining_seconds': max(0, int(states.get(name, {}).get('until', 0) - utc()))}
                               for name, provider in self.providers.items()},
-                'last_success': self.db.state('ai_last_success', {})}
+                'last_success': self.db.state('ai_last_success', {}),
+                'last_connection_tests': self.db.state('ai_connection_tests', {})}
+
+    async def test(self, name):
+        """One short, budgeted contract test; never creates or publishes content."""
+        if name not in self.providers:
+            raise ValueError('Unknown AI provider')
+        async with self.lock:
+            provider = self.providers[name]
+            state = self.db.state('ai_provider_health', {}).get(name, {})
+            remaining = max(0, int(state.get('until', 0) - utc()))
+            if remaining:
+                return {'provider': name, 'status': 'cooldown', 'seconds_remaining': remaining,
+                        'note': 'No API request sent. Wait for cooldown; quota is not reset.'}
+            day = datetime.now(timezone.utc).date().isoformat()
+            request = {'model': provider.s.ai_model,
+                       'messages': [{'role': 'user', 'content':
+                           'Return only a JSON object with title and body string fields. '
+                           'Set title to Connection test and body to API response received. '
+                           'Do not add commentary, numbers or market claims.'}],
+                       'response_format': {'type': 'json_object'}}
+            host = urlsplit(provider.s.ai_url).hostname
+            reasoning = host in ('api.groq.com', 'api.cerebras.ai') and 'gpt-oss' in provider.s.ai_model
+            request['max_completion_tokens' if reasoning else 'max_tokens'] = 1024
+            if host == 'api.groq.com' and reasoning:
+                request['reasoning_effort'] = 'low'
+            if host == 'openrouter.ai':
+                request['reasoning'] = {'effort': 'low', 'exclude': True}
+            reserve = 1024 + len(request['messages'][0]['content'].encode('utf-8')) + 512
+            if not self.db.reserve_budget(day, 'ai_tokens', reserve, self.s.ai_daily_tokens):
+                raise ValueError('Daily AI token reservation exhausted')
+            if not self.db.reserve_budget(day, 'ai_requests', 1, self.s.ai_daily_requests):
+                self.db.release_budget(day, 'ai_tokens', reserve)
+                raise ValueError('Daily AI request budget exhausted')
+            result = {'provider': name, 'model': provider.s.ai_model, 'at': utc(),
+                      'note': 'Connection/JSON test only; not market validation or publication.'}
+            try:
+                response = await provider._send(request, False, timeout=30)
+                result['http_status'] = response.status_code
+                if response.status_code != 200:
+                    self.db.release_budget(day, 'ai_tokens', reserve)
+                    reason = {400: 'Request rejected', 401: 'Authentication failed',
+                              402: 'Credits unavailable', 403: 'Access denied',
+                              404: 'Model or endpoint unavailable', 429: 'Provider quota/rate limit'}.get(
+                                  response.status_code, 'Provider HTTP error')
+                    result.update(status='failed', reason=reason)
+                    cooldown = 3600 if response.status_code in (400, 401, 402, 403, 404) else 120
+                    if response.status_code == 429:
+                        try:
+                            cooldown = min(86400, max(300, float(response.headers.get('retry-after', '300'))))
+                        except (ValueError, TypeError):
+                            cooldown = 300
+                        if re.search(r'daily|per[- ]day', response.text[:4000], re.I):
+                            cooldown = max(cooldown, 3600)
+                    # A diagnostic must not let callers hammer a real rate limit.
+                    self.mark(name, 'rate_limited' if response.status_code == 429 else 'unavailable',
+                              reason, cooldown)
+                else:
+                    data = response.json()
+                    usage = data.get('usage', {})
+                    used = usage.get('total_tokens') if isinstance(usage, dict) else None
+                    if type(used) is int and 0 < used <= reserve:
+                        self.db.release_budget(day, 'ai_tokens', reserve - used)
+                    choice = data['choices'][0]
+                    finish = choice.get('finish_reason')
+                    result['finish_reason'] = finish if finish in ('stop', 'length', 'content_filter', 'tool_calls') else 'other'
+                    answer = choice['message']['content']
+                    if finish == 'length':
+                        result.update(status='failed', reason='Output token limit reached')
+                    elif not isinstance(answer, str) or not answer.strip():
+                        result.update(status='failed', reason='Empty content from provider')
+                    else:
+                        fenced = re.fullmatch(r'\s*```(?:json)?\s*\n?(.*?)\n?```\s*', answer, re.S)
+                        raw = json.loads(fenced.group(1) if fenced else answer)
+                        valid = (isinstance(raw, dict) and isinstance(raw.get('title'), str)
+                                 and isinstance(raw.get('body'), str) and bool(raw['title'].strip()) and bool(raw['body'].strip()))
+                        result.update(status='ok' if valid else 'failed',
+                                      reason='API and JSON response working' if valid else 'Invalid title/body JSON structure')
+            except httpx.HTTPError as error:
+                reason = ('Timeout' if isinstance(error, httpx.TimeoutException) else
+                          'Connection failed' if isinstance(error, httpx.ConnectError) else
+                          'Response read failed' if isinstance(error, httpx.ReadError) else 'Transport failed')
+                result.update(status='failed', reason=reason,
+                              transport_type=type(error).__name__ if type(error).__name__ in (
+                                  'ReadTimeout', 'ConnectTimeout', 'PoolTimeout', 'WriteTimeout',
+                                  'ConnectError', 'ReadError', 'WriteError', 'RemoteProtocolError', 'LocalProtocolError') else 'HTTPError')
+                self.mark(name, 'unavailable', reason, 120)
+            except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+                result.update(status='failed', reason='Malformed response or JSON')
+            tests = self.db.state('ai_connection_tests', {})
+            tests[name] = result
+            self.db.set('ai_connection_tests', tests)
+            # A probe never marks a validated market draft successful and does
+            # not clear generation health, cooldowns or publication controls.
+            return result
 
     def mark(self, name, status, reason='', cooldown=0):
         states = self.db.state('ai_provider_health', {})
