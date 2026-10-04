@@ -61,6 +61,7 @@ class Desk:
         self.task = None
         self.heartbeat_task = None
         self.market_task = None
+        self.telegram_task = None
         self.idle_until = 0
         self.stopping = False
         self.lease_owned = False
@@ -329,7 +330,9 @@ class Desk:
             event = row['payload'].get('event')
             if event and utc() - event['as_of'] > self.s.draft_max_age:
                 self.db.update(row['id'], status='expired', clear_due=True)
-        await self.telegram.poll()
+        if not self.telegram_task:
+            await self.telegram.poll()
+            await self.telegram.flush()
         self.campaigns.expire()
         await self.news.poll()
         if utc() - self.db.state('last_scan_attempt', 0) >= self.s.scan_seconds or self.db.state('scan_requested', False):
@@ -337,7 +340,9 @@ class Desk:
             self.db.set('scan_requested', False)
             await self.scan()
         self.scheduler.allocate()
-        await self.telegram.poll()
+        if not self.telegram_task:
+            await self.telegram.poll()
+            await self.telegram.flush()
         if utc() >= self.db.state('publish_retry_after', 0):
             for row in self.scheduler.due():
                 await self.publisher.publish(row['id'])
@@ -380,10 +385,23 @@ class Desk:
                 self.lease_owned = False
                 logging.getLogger('square_desk').error('Worker lease renewal failed: %s', type(exc).__name__)
             if not self.lease_owned:
+                await self.telegram.stop_job()
                 if self.task:
                     self.task.cancel()
                 return
             await asyncio.sleep(30)
+
+    async def serve_telegram(self):
+        while not self.stopping:
+            if self.lease_owned:
+                try:
+                    await self.telegram.poll()
+                    await self.telegram.flush()
+                except Exception as error:
+                    logging.getLogger('square_desk').error('Telegram control unavailable: %s', type(error).__name__)
+            else:
+                await self.telegram.stop_job()
+            await asyncio.sleep(3)
 
     async def observe_market(self):
         # Public API observations stay in RAM between durable batches. A restart
@@ -490,12 +508,14 @@ class Desk:
             logging.getLogger('square_desk').info(
                 'Waiting for previous worker lease; HTTP ready, scheduler standby')
         self.task = asyncio.create_task(self.supervise())
+        if not self.batch_seconds and self.s.telegram_polling and self.s.telegram_token:
+            self.telegram_task = asyncio.create_task(self.serve_telegram())
         if self.market_cache:
             self.market_task = asyncio.create_task(self.observe_market())
 
     async def close(self):
         self.stopping = True
-        for task in (self.task, self.heartbeat_task, self.market_task):
+        for task in (self.task, self.heartbeat_task, self.market_task, self.telegram_task):
             if task:
                 task.cancel()
                 try:
@@ -504,6 +524,7 @@ class Desk:
                     pass
                 except Exception as exc:
                     logging.getLogger('square_desk').error('Worker stopped with error: %s', type(exc).__name__)
+        await self.telegram.stop_job()
         try:
             # Checking owner and releasing must be one transaction so a retiring
             # instance cannot erase the successor's lease.
