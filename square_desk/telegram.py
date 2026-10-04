@@ -17,6 +17,9 @@ def rejection_message(error):
         'AI access denied': 'AI provider ne access deny kiya (HTTP 403); account/model permissions check karo.',
         'AI endpoint or model unavailable': 'AI endpoint ya model nahi mila (HTTP 404); DESK_AI_URL aur DESK_AI_MODEL check karo.',
         'AI provider rate limit reached': 'AI provider ki rate limit lagi (HTTP 429); daily ya per-minute quota check karo, turant repeat mat karo.',
+        'AI provider credits unavailable': 'AI provider credits unavailable hain; paid model automatically use nahi kiya gaya.',
+        'All configured AI providers unavailable': 'Configured AI providers unavailable/cooldown mein hain ya output validation fail hui. /ai_status se provider health aur global bot budget dekho.',
+        'Unknown AI provider': 'Provider name /ai_status ke configured_order se copy karo.',
         'AI output token limit reached': 'AI output token limit par ruk gaya; article/JSON incomplete hai. AI output budget ka code fix chahiye.',
         'AI service rejected request': 'AI provider ne request reject ki; provider status check karo.',
         'AI network request failed': 'AI request timeout ya network failure hua.',
@@ -56,7 +59,7 @@ def rejection_message(error):
 
 
 HELP = '''Square Desk controls
-/status /auto /approval /universe /dashboard /queue /next /today /posts /articles
+/status /ai_status /ai_retry PROVIDER /auto /approval /universe /dashboard /queue /next /today /posts /articles
 /movers [15m|1h|4h|12h|24h|3d|7d] /gainers /losers /signals /alerts
 /scan /education /post_now SYMBOL /article_now SYMBOL /image_now ID
 /preview ID /approve ID /reject ID /edit ID Title|Body
@@ -212,6 +215,17 @@ class Telegram:
             return HELP
         if command in ('/status', '/dashboard'):
             return json.dumps(self.desk.status(), indent=2)
+        if command == '/ai_status':
+            ai = self.desk.content.ai
+            return json.dumps(ai.status() if ai and hasattr(ai, 'status') else {'configured': ai is not None}, indent=2)
+        if command == '/ai_retry':
+            ai = self.desk.content.ai
+            if not ai or not hasattr(ai, 'providers') or arg not in ai.providers:
+                raise ValueError('Unknown AI provider')
+            states = self.db.state('ai_provider_health', {})
+            states.pop(arg, None)
+            self.db.set('ai_provider_health', states)
+            return f'{arg} local cooldown cleared. Provider quota and global daily budgets are unchanged.'
         if command in ('/auto', '/approval'):
             values = self.db.state('runtime_settings', {})
             values.update(mode='automatic' if command == '/auto' else 'approval',
