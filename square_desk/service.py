@@ -131,6 +131,8 @@ class Desk:
 
     def get_draft(self, ident):
         row = self.db.get(ident)
+        if row and row['kind'] == 'signal':
+            raise ValueError('Paper signal ID is not a draft ID')
         if not row or row['kind'] != 'draft':
             raise ValueError('Unknown draft')
         return row
@@ -240,7 +242,7 @@ class Desk:
                     signal['derivatives'] = row.get('derivatives')
                     try:
                         ident = record_setup(self.db, signal)
-                        self.telegram.notify(f"Potential setup ${signal['symbol']} {signal['direction']}\nHeuristic score {signal['confidence']}; not probability.\nEntry {signal['entry']:.6g}, stop {signal['stop']:.6g}, target {signal['target1']:.6g} {signal['quote']}\n{ident}\nPaper tracking only.", key='signal:' + ident)
+                        self.telegram.notify(f"Paper signal ${signal['symbol']} {signal['direction']}\nHeuristic score {signal['confidence']:.2f}; not probability.\nEntry {signal['entry']:.6g}, stop {signal['stop']:.6g}, target {signal['target1']:.6g} {signal['quote']}\nSignal ID: {ident}\nPaper tracking only; this ID is not a publishable draft.\nDetails: /preview {ident}\nPublishable drafts: /queue", key='signal:' + ident)
                     except sqlite3.IntegrityError:
                         pass
                     candidates.append({'symbol': row['symbol'], 'category': 'setup', 'priority': 85,
