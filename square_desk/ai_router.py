@@ -22,6 +22,16 @@ class GoogleClient:
         prompt = '\n\n'.join(m['role'].upper() + ':\n' + m['content'] for m in json['messages'])
         body = {'contents': [{'role': 'user', 'parts': [{'text': prompt}]}],
                 'generationConfig': {'maxOutputTokens': json.get('max_tokens', json.get('max_completion_tokens', 6000))}}
+        if json.get('model') == 'gemini-3-flash-preview':
+            # Bound thinking so that the output allowance remains available for
+            # the draft. Gemma does not accept these Gemini-specific options.
+            body['generationConfig'].update({
+                'thinkingConfig': {'thinkingLevel': 'low'},
+                'responseMimeType': 'application/json',
+                'responseSchema': {
+                    'type': 'OBJECT', 'properties': {
+                        'title': {'type': 'STRING'}, 'body': {'type': 'STRING'}},
+                    'required': ['title', 'body']}})
         response = await self.client.post(url, headers={'x-goog-api-key': key}, json=body, timeout=timeout)
         if response.status_code != 200:
             return response
