@@ -40,6 +40,7 @@ def rejection_message(error):
         'Same underlying event already covered': 'BTC ya selected symbol ka event pehle se covered hai. /queue aur /posts check karo; existing draft ID use karo.',
         'Draft too similar to recent content': 'Draft recent content jaisa hai. /queue aur /posts check karo; duplicate post blocked hai.',
         'Unknown draft': 'Draft ID nahi mili. /queue se current database ki actual ID copy karo.',
+        'Paper signal ID is not a draft ID': 'Ye paper signal ID hai. /preview ID se signal details aur /queue se actual draft ID dekho; signal ko approve/publish nahi kiya ja sakta.',
         'Draft is immutable after publication or expiry': 'Draft publish, reject ya expire ho chuka hai. /queue se active draft select karo.',
         'Symbol must be on configured watchlist': 'Symbol watchlist mein nahi hai. /settings mein symbols check karo.',
         'Market evidence expired or future dated': 'Market evidence expired ya future dated hai. Fresh draft chahiye.',
@@ -349,6 +350,18 @@ class Telegram:
             ident = await self.desk.create_for_symbol(arg.upper(), article=command == '/article_now')
             return f'Draft {ident} created. Review with /preview {ident}; publishing limits still apply.'
         if command == '/preview':
+            signal = self.db.get(arg)
+            if signal and signal['kind'] == 'signal':
+                p = signal['payload']
+                linked = [r for r in self.db.list('draft', limit=500)
+                          if (r['payload'].get('event') or {}).get('signal_id') == arg]
+                links = '\n'.join(f"Draft {r['id']} [{r['status']}] /preview {r['id']}" for r in linked)
+                return (f"Paper signal {signal['id']} [{signal['status']}]\n"
+                        f"${p.get('symbol', '')} {p.get('direction', '')}\n"
+                        f"Entry {p.get('entry', 'unavailable')}, stop {p.get('stop', 'unavailable')}, "
+                        f"target {p.get('target1', 'unavailable')} {p.get('quote', '')}\n"
+                        'Ye tracking signal hai; is ID ko approve/publish nahi kiya ja sakta.\n'
+                        + (links if links else 'Is signal ka linked post draft nahi mila. Actual drafts: /queue.'))
             row = self.desk.get_draft(arg)
             p = row['payload']
             return f"{row['id']} [{row['status']}] [{p.get('generated_by', 'built-in/manual')}] {len(p['body'].split())} words\n{p['title']}\n\n{p['body']}"
