@@ -10,7 +10,8 @@ from .models import Snapshot, uid, utc, digest
 from .store import Store
 from .providers import Transport, BinanceProvider, CoinbaseProvider, ProviderPool, ProviderError
 from .analysis import studies, changes, regime, events, setup
-from .content import ContentEngine, CompatibleAI
+from .content import ContentEngine
+from .ai_router import AIRouter
 from .campaigns import CampaignManager
 from .analytics import Analytics
 from .scheduler import Scheduler
@@ -43,7 +44,8 @@ class Desk:
                                  self.market_cache or self.db, settings.candle_max_age)
         self.derivatives = BinanceDerivatives(self.transport, self.db) if settings.enable_derivatives else None
         self.news = NewsMonitor(settings, self.db, self.client)
-        ai = CompatibleAI(settings, self.db, self.client) if settings.ai_url and settings.ai_key and settings.ai_model else None
+        router = AIRouter(settings, self.db, self.client)
+        ai = router if router.configured else None
         self.content = ContentEngine(settings, self.db, ai)
         self.campaigns = CampaignManager(settings, self.db, self.content)
         self.analytics = Analytics(settings, self.db)
@@ -90,7 +92,8 @@ class Desk:
                 'market_universe': {'mode': self.s.market_universe, 'status': self.universe_state,
                                     'selected_count': len(self.universe), 'symbols': self.universe,
                                     'scan_batch_size': self.s.scan_batch_size},
-                'ai': {'configured': self.content.ai is not None, 'model': self.s.ai_model,
+                'ai': {**(self.content.ai.status() if isinstance(self.content.ai, AIRouter) else {}),
+                       'configured': self.content.ai is not None, 'model': self.s.ai_model,
                        'automatic_validated_posts': self.s.mode == 'automatic' and self.s.ai_auto_publish,
                        'last_generation': self.db.state('last_ai_generation', {})}}
 
