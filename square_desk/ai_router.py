@@ -74,7 +74,7 @@ class GoogleClient:
         prompt = '\n\n'.join(m['role'].upper() + ':\n' + m['content'] for m in json['messages'])
         body = {'contents': [{'role': 'user', 'parts': [{'text': prompt}]}],
                 'generationConfig': {'maxOutputTokens': json.get('max_tokens', json.get('max_completion_tokens', 6000))}}
-        if json.get('model') == 'gemini-3-flash-preview':
+        if json.get('model') in ('gemini-3-flash-preview', 'gemini-3.1-flash-lite'):
             # Bound thinking so that the output allowance remains available for
             # the draft. Gemma does not accept these Gemini-specific options.
             body['generationConfig'].update({
@@ -153,11 +153,11 @@ class PacedAI(CompatibleAI):
         if urlsplit(self.s.ai_url).hostname == 'openrouter.ai':
             return await self.client.post(self.s.ai_url, headers={'Authorization': 'Bearer ' + self.s.ai_key},
                                           json=request, timeout=timeout)
-        if urlsplit(self.s.ai_url).hostname == 'api.groq.com':
-            return await super()._send(request, article, timeout=timeout)
-        async with self.request_lock:
-            await asyncio.sleep(max(0, self.next_request_at - time.monotonic()))
-            self.next_request_at = time.monotonic() + self.spacing
+        owner = getattr(self, 'pacing_owner', self)
+        spacing = (61 if article else 20) if urlsplit(self.s.ai_url).hostname == 'api.groq.com' else self.spacing
+        async with owner.request_lock:
+            await asyncio.sleep(max(0, owner.next_request_at - time.monotonic()))
+            owner.next_request_at = time.monotonic() + spacing
             return await self.client.post(self.s.ai_url, headers={'Authorization': 'Bearer ' + self.s.ai_key},
                                           json=request, timeout=timeout)
 
@@ -200,23 +200,39 @@ class AIRouter:
                 self.openrouter_variants.append(PacedAI(replace(original.s, ai_model=model), store, original.client, 4))
             # All variants share one pacing clock and lock, including probes.
             self.providers['openrouter'] = self.openrouter_variants[0]
+        self.model_variants = {'openrouter': self.openrouter_variants} if self.openrouter_variants else {}
+        for name in ('groq', 'google'):
+            models = getattr(settings, name + '_models')
+            if name in self.providers and models:
+                original = self.providers[name]
+                variants = []
+                for model in models:
+                    url = original.s.ai_url
+                    if name == 'google':
+                        url = 'https://generativelanguage.googleapis.com/v1beta/models/' + quote(model, safe='') + ':generateContent'
+                    variant = PacedAI(replace(original.s, ai_model=model, ai_url=url), store, original.client, original.spacing)
+                    variant.pacing_owner = original
+                    variants.append(variant)
+                self.model_variants[name] = variants
+                self.providers[name] = variants[0]
 
     def candidates(self, name):
-        variants = self.openrouter_variants if name == 'openrouter' and self.openrouter_variants else [self.providers[name]]
-        states = self.db.state('ai_openrouter_model_health', {})
+        variants = self.model_variants.get(name, [self.providers[name]])
+        states = self.db.state('ai_' + name + '_model_health', {})
         return [p for p in variants
-                if name != 'openrouter' or not self.openrouter_variants or states.get(p.s.ai_model, {}).get('until', 0) <= utc()][:self.s.openrouter_max_model_attempts]
+                if name not in self.model_variants or states.get(p.s.ai_model, {}).get('until', 0) <= utc()][:getattr(self.s, name + '_max_model_attempts', 1)]
 
     def mark_candidate(self, name, provider, status, reason='', cooldown=0, account=False):
-        if name != 'openrouter' or not self.openrouter_variants:
+        if name not in self.model_variants:
             self.mark(name, status, reason, cooldown)
             return
-        states = self.db.state('ai_openrouter_model_health', {})
+        state_key = 'ai_' + name + '_model_health'
+        states = self.db.state(state_key, {})
         old = states.get(provider.s.ai_model, {})
         states[provider.s.ai_model] = {'status': status, 'reason': reason, 'at': utc(),
             'until': utc() + cooldown if cooldown else 0,
             'failures': old.get('failures', 0) + 1 if status != 'ok' else 0}
-        self.db.set('ai_openrouter_model_health', states)
+        self.db.set(state_key, states)
         self.mark(name, status, reason, cooldown if account else 0)
 
     def generation_candidates(self):
@@ -245,7 +261,12 @@ class AIRouter:
         day = datetime.now(timezone.utc).date().isoformat()
         states = self.db.state('ai_provider_health', {})
         return {'configured': bool(self.providers), 'configured_order': list(self.providers),
-                'implementation_revision': '2026-10-05-multi-model-4',
+                'implementation_revision': '2026-10-05-all-provider-models-5',
+                'model_orders': {name: [p.s.ai_model for p in variants] for name, variants in self.model_variants.items()},
+                'model_health': {name: {p.s.ai_model: {
+                    **self.db.state('ai_' + name + '_model_health', {}).get(p.s.ai_model, {}),
+                    'cooldown_remaining_seconds': max(0, int(self.db.state('ai_' + name + '_model_health', {}).get(p.s.ai_model, {}).get('until', 0) - utc()))}
+                    for p in variants} for name, variants in self.model_variants.items()},
                 'openrouter_model_order': [p.s.ai_model for p in self.openrouter_variants],
                 'openrouter_model_health': {
                     p.s.ai_model: {**self.db.state('ai_openrouter_model_health', {}).get(p.s.ai_model, {}),
@@ -288,6 +309,8 @@ class AIRouter:
             request['max_completion_tokens' if reasoning else 'max_tokens'] = 1024
             if host == 'api.groq.com' and reasoning:
                 request['reasoning_effort'] = 'low'
+            elif host == 'api.groq.com' and provider.s.ai_model == 'qwen/qwen3.8-27b':
+                request['reasoning_effort'] = 'none'
             if host == 'openrouter.ai':
                 request['reasoning'] = openrouter_reasoning(provider.s.ai_model)
             reserve = 1024 + len(request['messages'][0]['content'].encode('utf-8')) + 512
@@ -318,7 +341,7 @@ class AIRouter:
                         if re.search(r'daily|per[- ]day', response.text[:4000], re.I):
                             cooldown = max(cooldown, 3600)
                     # A diagnostic must not let callers hammer a real rate limit.
-                    account = response.status_code in (401, 402) or result['limit_scope'] in ('account', 'daily')
+                    account = response.status_code in (401, 402) or result['limit_scope'] == 'account' or (name == 'openrouter' and result['limit_scope'] == 'daily')
                     self.mark_candidate(name, provider, 'rate_limited' if response.status_code == 429 else 'unavailable',
                                         reason, cooldown, account=account)
                 else:
@@ -386,7 +409,7 @@ class AIRouter:
                     self.mark_candidate(name, provider, 'unavailable', 'AI request timed out', 120)
                     continue
                 except AIRequestError as error:
-                    account = error.status in (0, 401, 402) or error.limit_scope in ('account', 'daily')
+                    account = error.status in (0, 401, 402) or error.limit_scope == 'account' or (name == 'openrouter' and error.limit_scope == 'daily')
                     self.mark_candidate(name, provider, 'rate_limited' if error.status == 429 else 'unavailable',
                                         str(error), error.cooldown, account=account)
                     self.db.log('AI', f'{name}: HTTP {error.status}; trying next configured provider')
