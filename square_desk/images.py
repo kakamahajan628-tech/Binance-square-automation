@@ -1,12 +1,27 @@
 """Real-data raster charts and separate editorial cards. No generated candles."""
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
-from .models import stamp, digest
+from .models import stamp
+import hashlib
+import io
 
 
 def font(size):
     # Pillow's bundled scalable font keeps Render and Windows output consistent.
     return ImageFont.load_default(size=size)
+
+
+def save_png(image, directory):
+    stream = io.BytesIO()
+    image.save(stream, format='PNG')
+    data = stream.getvalue()
+    # Content-addressed names prevent a redraw or rendering update from
+    # overwriting another pending draft's already reviewed chart.
+    path = Path(directory) / (hashlib.sha256(data).hexdigest() + '.png')
+    with Image.open(io.BytesIO(data)) as verified:
+        verified.verify()
+    path.write_bytes(data)
+    return path.name
 
 
 def chart(snapshot, metrics, directory):
@@ -41,12 +56,7 @@ def chart(snapshot, metrics, directory):
             d.text((55, y(level) - 23), f'{key.capitalize()} {level:.6g}', fill=color, font=font(16))
     d.text((45, 580), 'Volume (base asset units)', font=font(16), fill='#a7bbd2')
     d.text((45, 737), f"RSI {metrics['rsi']:.1f} | ATR {metrics['atr']:.6g} | Research reference levels, no guaranteed outcome", font=font(18), fill='#a7bbd2')
-    path = Path(directory) / (digest({'symbol': snapshot.symbol, 'source': snapshot.source, 'as_of': snapshot.as_of}) + '.png')
-    image.save(path)
-    # Decode the finished file, so failures do not enter the publication workflow.
-    with Image.open(path) as verified:
-        verified.verify()
-    return path.name
+    return save_png(image, directory)
 
 
 def graphic(title, subtitle, directory):
@@ -59,6 +69,4 @@ def graphic(title, subtitle, directory):
         d.text((60, 160 + i * 58), line, font=font(38), fill='#f3f6fc')
     for i, line in enumerate(textwrap.wrap(subtitle[:220], 80)[:3]):
         d.text((60, 480 + i * 32), line, font=font(22), fill='#a7bbd2')
-    path = Path(directory) / (digest({'title': title, 'subtitle': subtitle}) + '.png')
-    image.save(path)
-    return path.name
+    return save_png(image, directory)
