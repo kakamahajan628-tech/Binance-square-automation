@@ -48,6 +48,13 @@ def rejection_message(error):
         'Number is not bound to recorded evidence': 'Draft mein ek number recorded evidence se match nahi karta; publishing blocked hai.',
         'Missing source or timestamp': 'Draft ka source ya timestamp missing hai.',
         'Missing relevant ticker': 'Draft mein relevant ticker missing hai.',
+        'Unknown signal': 'Signal ID nahi mili. /signals se actual Signal ID copy karo.',
+        'Signal analysis requires a configured AI endpoint': 'Signal analysis ke liye AI integration chahiye; /ai_status check karo.',
+        'Signal is inactive or stale; use a fresh signal': 'Signal stale, triggered, closed ya invalidated hai. /signals se fresh watching signal use karo.',
+        'Signal market evidence does not match': 'Signal ke symbol/source/quote se fresh market data match nahi hua; draft nahi bana.',
+        'Signal setup no longer qualifies on fresh evidence': 'Fresh candles par setup qualify nahi hua ya direction badal gayi; purana signal publish nahi hoga.',
+        'Signal draft missing setup levels or direction': 'AI signal analysis mein required levels/direction missing hain; draft validation fail hui.',
+        'Signal draft missing heuristic score disclosure': 'AI ne heuristic score ka disclosure nahi diya; draft validation fail hui.',
         'Invalid formatting': 'Draft formatting validation fail hui.',
         'Prohibited promotion or unsupported profit language': 'Draft content validation fail hui; unsupported promotional claim blocked hai.',
         'Control characters are not permitted': 'Draft mein invalid control characters hain.',
@@ -69,7 +76,7 @@ def rejection_message(error):
 HELP = '''Square Desk controls
 /status /ai_status /ai_test PROVIDER /ai_retry PROVIDER /auto /approval /universe /dashboard /queue /next /today /posts /articles
 /movers [15m|1h|4h|12h|24h|3d|7d] /gainers /losers /signals /alerts
-/scan /education /post_now SYMBOL /article_now SYMBOL /image_now ID
+/scan /education /post_now SYMBOL /article_now SYMBOL /signal_draft SIGNAL_ID /image_now ID
 /preview ID /approve ID /reject ID /edit ID Title|Body
 /regenerate ID /reschedule ID ISO_DATE /delete_queue ID
 /pause /resume /emergency_stop /unlock CONFIRM
@@ -209,7 +216,7 @@ class Telegram:
         name = text.strip().split(maxsplit=1)[0].split('@')[0].lower() if text.strip() else ''
         # Only generation jobs are detached, with one bounded slot. Fast safety
         # commands remain responsive while AI waits for a provider or pacing.
-        if name in ('/post_now', '/article_now', '/regenerate', '/project_draft', '/news_draft', '/ai_test') and not getattr(self.desk, 'batch_seconds', 0):
+        if name in ('/post_now', '/article_now', '/signal_draft', '/regenerate', '/project_draft', '/news_draft', '/ai_test') and not getattr(self.desk, 'batch_seconds', 0):
             if self.job_task and not self.job_task.done():
                 self.db.update(command_id, status='rejected')
                 self.notify('Ek AI command abhi processing mein hai. Uska result aane do; /status aur /ai_status available hain.',
@@ -349,6 +356,14 @@ class Telegram:
         if command in ('/post_now', '/article_now'):
             ident = await self.desk.create_for_symbol(arg.upper(), article=command == '/article_now')
             return f'Draft {ident} created. Review with /preview {ident}; publishing limits still apply.'
+        if command == '/signal_draft':
+            ident = await self.desk.create_for_signal(arg)
+            row = self.desk.get_draft(ident)
+            p = row['payload']
+            return (f"Signal {arg} → AI draft {ident} [{row['status']}]\n"
+                    f"{p['title']}\n\n{p['body']}\n\n"
+                    f"/preview {ident}\n/approve {ident}\n/reject {ident}\n"
+                    'Fresh revalidated analysis; approval and scheduled publication required.')
         if command == '/preview':
             signal = self.db.get(arg)
             if signal and signal['kind'] == 'signal':
@@ -361,7 +376,7 @@ class Telegram:
                         f"Entry {p.get('entry', 'unavailable')}, stop {p.get('stop', 'unavailable')}, "
                         f"target {p.get('target1', 'unavailable')} {p.get('quote', '')}\n"
                         'Ye tracking signal hai; is ID ko approve/publish nahi kiya ja sakta.\n'
-                        + (links if links else 'Is signal ka linked post draft nahi mila. Actual drafts: /queue.'))
+                        + (links if links else f'Is signal ka linked post draft nahi mila. Create: /signal_draft {arg}'))
             row = self.desk.get_draft(arg)
             p = row['payload']
             return f"{row['id']} [{row['status']}] [{p.get('generated_by', 'built-in/manual')}] {len(p['body'].split())} words\n{p['title']}\n\n{p['body']}"
