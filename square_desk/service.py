@@ -53,6 +53,7 @@ class Desk:
         self.publisher = PublicationService(settings, self.db, self.content.checker, self.client)
         self.telegram = Telegram(settings, self.db, self, self.client)
         self.scan_lock = asyncio.Lock()
+        self.signal_draft_lock = asyncio.Lock()
         self.universe = list(settings.symbols)
         self.universe_checked_at = 0
         self.scan_cursor = 0
@@ -175,6 +176,61 @@ class Desk:
                  'event_key': f'{symbol}:manual:{"article" if article else "post"}:{int(snap.as_of // 14400)}'}
         return await self.content.draft(event, article)
 
+    async def create_for_signal(self, ident):
+        """Revalidate a paper candidate; create a separate, approval-only draft."""
+        async with self.signal_draft_lock:
+            row = self.db.get(ident)
+            if not row or row['kind'] != 'signal':
+                raise ValueError('Unknown signal')
+            signal = row['payload']
+            now = utc()
+            if (row['status'] != 'watching' or signal.get('expires_at', 0) <= now
+                    or not 0 <= now - signal.get('as_of', 0) <= self.s.draft_max_age):
+                raise ValueError('Signal is inactive or stale; use a fresh signal')
+            for draft in self.db.list('draft', limit=10000):
+                if (draft['payload'].get('event') or {}).get('signal_id') != ident:
+                    continue
+                if draft['status'] in ('review', 'approved', 'queued'):
+                    errors = self.content.checker.check(draft['payload'])
+                    if not errors and (draft['payload'].get('event') or {}).get('manual_signal_review'):
+                        return draft['id']
+                if draft['status'] in PUBLICATION_STATES:
+                    raise ValueError('Same underlying event already covered')
+            if not self.content.ai:
+                raise ValueError('Signal analysis requires a configured AI endpoint')
+            symbol = signal['symbol']
+            snapshots = {}
+            for asset in dict.fromkeys((symbol, 'BTC', 'ETH')):
+                snap = await self.pool.fetch(asset)
+                snap.validate(utc(), self.s.candle_max_age)
+                if snap.symbol != asset:
+                    raise ValueError('Signal market evidence does not match')
+                snapshots[asset] = snap
+            snap = snapshots[symbol]
+            if snap.source != signal['source'] or snap.quote != signal['quote']:
+                raise ValueError('Signal market evidence does not match')
+            # An intervening stop, trigger or expiry cannot be presented as a
+            # pending entry setup. Tracking remains separate from publication.
+            advance(self.db, snap, self.s)
+            if self.db.get(ident)['status'] != 'watching':
+                raise ValueError('Signal is inactive or stale; use a fresh signal')
+            rows = [{'symbol': asset, 'metrics': studies(s), 'changes': changes(s)}
+                    for asset, s in snapshots.items()]
+            context = regime(rows)
+            market = next(r for r in rows if r['symbol'] == symbol)
+            fresh = setup(market, context, self.s)
+            if not fresh or fresh['direction'] != signal['direction'] or fresh['type'] != signal['type']:
+                raise ValueError('Signal setup no longer qualifies on fresh evidence')
+            event = {'symbol': symbol, 'category': 'setup', 'priority': 85, 'angle': 'risk',
+                'metrics': {**market['metrics'], **{key: fresh[key] for key in
+                    ('entry', 'stop', 'target1', 'target2', 'confidence', 'risk_reward')}},
+                'changes': market['changes'], 'direction': fresh['direction'], 'as_of': snap.as_of,
+                'signal_id': ident, 'manual_signal_review': True,
+                'signal_expires_at': signal['expires_at'], 'original_signal_as_of': signal['as_of'],
+                'setup_type': fresh['type'], 'setup_regime': context['name'],
+                'event_key': f'{symbol}:signal_review:{ident}:{int(snap.as_of)}'}
+            return await self.content.draft(event)
+
     def make_image(self, ident):
         row = self.get_draft(ident)
         if row['status'] not in ('review', 'approved', 'queued'):
@@ -242,7 +298,7 @@ class Desk:
                     signal['derivatives'] = row.get('derivatives')
                     try:
                         ident = record_setup(self.db, signal)
-                        self.telegram.notify(f"Paper signal ${signal['symbol']} {signal['direction']}\nHeuristic score {signal['confidence']:.2f}; not probability.\nEntry {signal['entry']:.6g}, stop {signal['stop']:.6g}, target {signal['target1']:.6g} {signal['quote']}\nSignal ID: {ident}\nPaper tracking only; this ID is not a publishable draft.\nDetails: /preview {ident}\nPublishable drafts: /queue", key='signal:' + ident)
+                        self.telegram.notify(f"Paper signal ${signal['symbol']} {signal['direction']}\nHeuristic score {signal['confidence']:.2f}; not probability.\nEntry {signal['entry']:.6g}, stop {signal['stop']:.6g}, target {signal['target1']:.6g} {signal['quote']}\nSignal ID: {ident}\nPaper tracking only; this ID is not a publishable draft.\nDetails: /preview {ident}\nCreate reviewed AI draft: /signal_draft {ident}", key='signal:' + ident)
                     except sqlite3.IntegrityError:
                         pass
                     candidates.append({'symbol': row['symbol'], 'category': 'setup', 'priority': 85,
