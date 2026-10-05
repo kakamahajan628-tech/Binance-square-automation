@@ -59,6 +59,7 @@ def validation_reason(error):
         'Invalid formatting', 'Control characters are not permitted',
         'Word count outside configured limits', 'Missing source or timestamp',
         'Missing relevant ticker'}
+    fixed.update({'Signal draft missing setup levels or direction', 'Signal draft missing heuristic score disclosure'})
     if reason in fixed or re.fullmatch(r'AI body word count \d+; required \d+-\d+', reason):
         return reason
     return 'Output failed generation validation'
@@ -261,7 +262,7 @@ class AIRouter:
         day = datetime.now(timezone.utc).date().isoformat()
         states = self.db.state('ai_provider_health', {})
         return {'configured': bool(self.providers), 'configured_order': list(self.providers),
-                'implementation_revision': '2026-10-05-all-provider-models-5',
+                'implementation_revision': '2026-10-05-signal-review-7',
                 'model_orders': {name: [p.s.ai_model for p in variants] for name, variants in self.model_variants.items()},
                 'model_health': {name: {p.s.ai_model: {
                     **self.db.state('ai_' + name + '_model_health', {}).get(p.s.ai_model, {}),
