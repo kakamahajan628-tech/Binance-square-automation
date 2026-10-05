@@ -64,10 +64,14 @@ class Settings:
     ai_daily_tokens: int = 40000
     ai_provider_order: tuple[str, ...] = ('groq', 'cerebras', 'google', 'openrouter', 'mistral', 'cloudflare', 'kilo')
     ai_max_provider_attempts: int = 4
+    groq_models: tuple[str, ...] = ()
+    groq_max_model_attempts: int = 4
     cerebras_api_key: str = field(default='', repr=False)
     cerebras_model: str = 'gpt-oss-120b'
     google_api_key: str = field(default='', repr=False)
     google_model: str = 'gemma-4-31b-it'
+    google_models: tuple[str, ...] = ()
+    google_max_model_attempts: int = 4
     openrouter_api_key: str = field(default='', repr=False)
     openrouter_model: str = 'openrouter/free'
     openrouter_models: tuple[str, ...] = ()
@@ -176,8 +180,17 @@ class Settings:
             raise ValueError('OpenRouter model chain requires at most ten distinct free-only model IDs')
         if self.kilo_enabled and not (self.kilo_model == 'kilo-auto/free' or self.kilo_model.endswith(':free')):
             raise ValueError('Kilo fallback must use a free-only model')
-        if self.google_api_key and self.google_model not in ('gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemini-3-flash-preview'):
+        google_supported = {'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite'}
+        if self.google_api_key and self.google_model not in google_supported:
             raise ValueError('Google model must be a supported hosted Gemma 4 or Gemini 3 Flash model')
+        for name in ('groq', 'google'):
+            models = getattr(self, name + '_models')
+            if (not 1 <= getattr(self, name + '_max_model_attempts') <= 4
+                    or len(models) > 4 or len(set(models)) != len(models)
+                    or any(len(m) > 160 or not re.fullmatch(r'[A-Za-z0-9_./:-]+', m) for m in models)):
+                raise ValueError('Model chain requires at most four distinct valid model IDs')
+            if name == 'google' and any(m not in google_supported for m in models):
+                raise ValueError('Unsupported Google model in chain')
         for name in ('cerebras_model', 'google_model', 'openrouter_model', 'mistral_model', 'cloudflare_model', 'kilo_model', 'nvidia_model', 'cohere_model'):
             model = getattr(self, name)
             if len(model) > 160 or any(ord(c) < 32 for c in model):
