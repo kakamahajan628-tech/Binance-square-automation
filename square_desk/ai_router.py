@@ -4,6 +4,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import re
+import socket
+import ssl
 import time
 from urllib.parse import quote, urlsplit
 
@@ -11,6 +13,39 @@ import httpx
 
 from .content import CompatibleAI, AIRequestError, FactChecker
 from .models import utc
+
+
+def transport_diagnostic(error):
+    # All HTTPX exception classes are application/library-owned. Allowing their
+    # names avoids collapsing DecodingError/ProxyError into a generic HTTPError.
+    names = {name for name in dir(httpx) if isinstance(getattr(httpx, name), type)
+             and issubclass(getattr(httpx, name), httpx.HTTPError)}
+    kind = type(error).__name__
+    reason = ('Timeout' if isinstance(error, httpx.TimeoutException) else
+              'Connection failed' if isinstance(error, httpx.ConnectError) else
+              'Response read failed' if isinstance(error, httpx.ReadError) else
+              'Response decoding failed' if isinstance(error, httpx.DecodingError) else
+              'Proxy connection failed' if isinstance(error, httpx.ProxyError) else
+              'Unsupported URL protocol' if isinstance(error, httpx.UnsupportedProtocol) else
+              'Remote HTTP protocol failed' if isinstance(error, httpx.RemoteProtocolError) else
+              'Local HTTP protocol failed' if isinstance(error, httpx.LocalProtocolError) else
+              'Transport failed')
+    result = {'reason': reason, 'transport_type': kind if kind in names else 'HTTPError'}
+    cause = error
+    for _ in range(6):
+        if isinstance(cause, ssl.SSLCertVerificationError):
+            result['network_cause'] = 'TLS certificate verification failed'
+            break
+        if isinstance(cause, ssl.SSLError):
+            result['network_cause'] = 'TLS handshake failed'
+            break
+        if isinstance(cause, socket.gaierror):
+            result['network_cause'] = 'DNS lookup failed'
+            break
+        cause = cause.__cause__ or cause.__context__
+        if cause is None:
+            break
+    return result
 
 
 def validation_reason(error):
@@ -49,7 +84,8 @@ class GoogleClient:
                     'type': 'OBJECT', 'properties': {
                         'title': {'type': 'STRING'}, 'body': {'type': 'STRING'}},
                     'required': ['title', 'body']}})
-        response = await self.client.post(url, headers={'x-goog-api-key': key}, json=body, timeout=timeout)
+        response = await self.client.post(url, headers={'x-goog-api-key': key,
+            'Accept': 'application/json', 'Accept-Encoding': 'identity'}, json=body, timeout=timeout)
         if response.status_code != 200:
             return response
         try:
@@ -131,7 +167,7 @@ class AIRouter:
         day = datetime.now(timezone.utc).date().isoformat()
         states = self.db.state('ai_provider_health', {})
         return {'configured': bool(self.providers), 'configured_order': list(self.providers),
-                'implementation_revision': '2026-10-04-ai-probe-1',
+                'implementation_revision': '2026-10-05-google-transport-2',
                 'max_provider_attempts_per_draft': self.s.ai_max_provider_attempts,
                 'budget_day_utc': day,
                 'global_budget': {
@@ -219,14 +255,8 @@ class AIRouter:
                         result.update(status='ok' if valid else 'failed',
                                       reason='API and JSON response working' if valid else 'Invalid title/body JSON structure')
             except httpx.HTTPError as error:
-                reason = ('Timeout' if isinstance(error, httpx.TimeoutException) else
-                          'Connection failed' if isinstance(error, httpx.ConnectError) else
-                          'Response read failed' if isinstance(error, httpx.ReadError) else 'Transport failed')
-                result.update(status='failed', reason=reason,
-                              transport_type=type(error).__name__ if type(error).__name__ in (
-                                  'ReadTimeout', 'ConnectTimeout', 'PoolTimeout', 'WriteTimeout',
-                                  'ConnectError', 'ReadError', 'WriteError', 'RemoteProtocolError', 'LocalProtocolError') else 'HTTPError')
-                self.mark(name, 'unavailable', reason, 120)
+                result.update(status='failed', **transport_diagnostic(error))
+                self.mark(name, 'unavailable', result['reason'], 120)
             except (ValueError, KeyError, IndexError, TypeError, AttributeError):
                 result.update(status='failed', reason='Malformed response or JSON')
             tests = self.db.state('ai_connection_tests', {})
