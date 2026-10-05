@@ -188,6 +188,8 @@ class CompatibleAI:
         request['max_completion_tokens' if groq_reasoning or cerebras_reasoning else 'max_tokens'] = budget
         if groq_reasoning:
             request['reasoning_effort'] = 'low'
+        elif urlsplit(self.s.ai_url).hostname == 'api.groq.com' and self.s.ai_model == 'qwen/qwen3.8-27b':
+            request['reasoning_effort'] = 'none'
         if urlsplit(self.s.ai_url).hostname == 'openrouter.ai':
             request['reasoning'] = openrouter_reasoning(self.s.ai_model)
         if correction is not None:
