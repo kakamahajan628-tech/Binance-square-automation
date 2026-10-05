@@ -11,7 +11,7 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
-from .content import CompatibleAI, AIRequestError, FactChecker
+from .content import CompatibleAI, AIRequestError, FactChecker, openrouter_reasoning
 from .models import utc
 
 
@@ -167,7 +167,7 @@ class AIRouter:
         day = datetime.now(timezone.utc).date().isoformat()
         states = self.db.state('ai_provider_health', {})
         return {'configured': bool(self.providers), 'configured_order': list(self.providers),
-                'implementation_revision': '2026-10-05-google-transport-2',
+                'implementation_revision': '2026-10-05-pinned-free-model-3',
                 'max_provider_attempts_per_draft': self.s.ai_max_provider_attempts,
                 'budget_day_utc': day,
                 'global_budget': {
@@ -203,7 +203,7 @@ class AIRouter:
             if host == 'api.groq.com' and reasoning:
                 request['reasoning_effort'] = 'low'
             if host == 'openrouter.ai':
-                request['reasoning'] = {'effort': 'low', 'exclude': True}
+                request['reasoning'] = openrouter_reasoning(provider.s.ai_model)
             reserve = 1024 + len(request['messages'][0]['content'].encode('utf-8')) + 512
             if not self.db.reserve_budget(day, 'ai_tokens', reserve, self.s.ai_daily_tokens):
                 raise ValueError('Daily AI token reservation exhausted')
