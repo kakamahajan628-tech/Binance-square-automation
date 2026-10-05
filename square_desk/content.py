@@ -74,11 +74,32 @@ class _LengthDraftError(ValueError):
                       'required_maximum': upper, 'correction': 'Expand or shorten the complete body to the required range without repetition or invented facts.'}
 
 
+def rate_limit_diagnostic(response):
+    """Classify limits without retaining provider messages or private metadata."""
+    scope = 'unknown'
+    if response.status_code == 429:
+        try:
+            error = response.json().get('error', {})
+            metadata = error.get('metadata', {}) if isinstance(error, dict) else {}
+            metadata = metadata if isinstance(metadata, dict) else {}
+        except (ValueError, AttributeError):
+            metadata = {}
+        text = response.text[:4000]
+        if re.search(r'daily|per[- ]day', text, re.I):
+            scope = 'daily'
+        elif any(h in response.headers for h in ('x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset')):
+            scope = 'account'
+        elif metadata.get('provider_name') or metadata.get('provider_code'):
+            scope = 'model'
+    return scope
+
+
 class AIRequestError(ValueError):
     """Application-owned reason and cooldown, never a raw provider error."""
-    def __init__(self, reason, status=0, cooldown=120):
+    def __init__(self, reason, status=0, cooldown=120, limit_scope='unknown'):
         super().__init__(reason)
         self.status, self.cooldown = status, cooldown
+        self.limit_scope = limit_scope
 
 
 class CompatibleAI:
@@ -232,7 +253,7 @@ class CompatibleAI:
                                 cooldown = max(cooldown, min(86400, float(response.headers[header])))
                             except ValueError:
                                 pass
-                raise AIRequestError(reason, response.status_code, cooldown)
+                raise AIRequestError(reason, response.status_code, cooldown, rate_limit_diagnostic(response))
             data = response.json()
             if not isinstance(data, dict):
                 raise ValueError('Invalid AI structure')
