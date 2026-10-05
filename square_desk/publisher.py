@@ -6,6 +6,27 @@ from .models import utc, digest
 from .compliance import Compliance
 
 
+# These official codes reject the submitted content, not the whole account.
+# Unknown, authentication and account-restriction codes retain the global latch.
+DRAFT_REJECTIONS = {
+    '20002': 'Sensitive words detected in this draft',
+    '20022': 'Sensitive words detected in this draft',
+    '20013': 'Content length rejected by Square; check title/body length and short-post versus article type',
+    '20020': 'Content body must not be empty',
+    '220011': 'Content body must not be empty',
+}
+
+
+def publication_lengths(draft):
+    title, body = draft.get('title', ''), draft.get('body', '')
+    article = bool(draft.get('article'))
+    submitted = body if article else title + '\n\n' + body
+    return {'content_type': 2 if article else 1, 'title_characters': len(title),
+            'body_characters': len(body), 'body_words': len(body.split()),
+            'submitted_text_characters': len(submitted),
+            'submitted_text_utf16_units': len(submitted.encode('utf-16-le')) // 2}
+
+
 class Publisher(Protocol):
     async def send(self, draft: dict) -> dict: ...
 
@@ -77,10 +98,21 @@ class PublicationService:
         import re
         code = str(reason.get('code', ''))
         code = code if re.fullmatch(r'[A-Za-z0-9_-]{1,30}', code) else 'unavailable'
+        rejected = self.db.get(reason.get('draft_id')) if reason.get('draft_id') else None
+        if rejected and rejected['kind'] == 'draft':
+            reason = {**reason, 'lengths': publication_lengths(rejected['payload'])}
+        if code in DRAFT_REJECTIONS:
+            reason = {**reason, 'message': DRAFT_REJECTIONS[code], 'scope': 'draft'}
+        next_step = ('Correct the rejected draft; do not re-approve unchanged content. '
+                     'Use /policy_clear CONFIRM to clear this legacy draft-error latch after review.'
+                     if blocked and code in DRAFT_REJECTIONS else
+                     'Review the rejection and fix Square access; then /policy_clear CONFIRM. Re-approve only a rejected draft.'
+                     if blocked else 'Publication gates and approval still apply.')
         return {'blocked': blocked, 'reason': {**reason, 'code': code} if reason else {},
+                'last_rejection': self.db.state('publish_last_rejection', {}),
                 'retry_after': self.db.state('publish_retry_after', 0),
                 'uncertain_submissions': len(self.db.list('draft', ['uncertain'])),
-                'next_step': 'Review the rejection and fix Square access; then /policy_clear CONFIRM. Re-approve only a rejected draft.' if blocked else 'Publication gates and approval still apply.'}
+                'next_step': next_step}
 
     async def publish(self, ident):
         # The worker holds a service lease. Reservation and state change are atomic,
@@ -138,10 +170,17 @@ class PublicationService:
             self.db.log('PUBLISH', 'Uncertain submission; automatic retry forbidden, reconcile in Creator Center', ident)
         except RejectedPublication as exc:
             draft['rejection_code'] = exc.code
+            draft['approved_at'] = None
+            draft['human_review_required'] = True
+            details = {'code': exc.code, 'draft_id': ident, 'at': utc(),
+                       'lengths': publication_lengths(draft)}
+            if exc.code in DRAFT_REJECTIONS:
+                details.update(scope='draft', message=DRAFT_REJECTIONS[exc.code])
+            self.db.set('publish_last_rejection', details)
             if exc.code in ('429', '220009'):
                 self.db.set('publish_retry_after', utc() + max(exc.retry_after, 3600))
                 self.db.set('policy_caps', {'daily': max(1, self.policy.caps()['daily'] - 1)})
-            elif exc.code != 'media_requires_manual_export':
+            elif exc.code != 'media_requires_manual_export' and exc.code not in DRAFT_REJECTIONS:
                 self.db.set('publisher_blocked', True)
                 self.db.set('publisher_block_reason', {'code': exc.code, 'draft_id': ident, 'at': utc()})
             self.db.update(ident, status='review', payload=draft)
