@@ -11,7 +11,7 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
-from .content import CompatibleAI, AIRequestError, FactChecker, openrouter_reasoning
+from .content import CompatibleAI, AIRequestError, FactChecker, openrouter_reasoning, rate_limit_diagnostic
 from .models import utc
 
 
@@ -112,12 +112,47 @@ class OptionalBearerClient:
         return await self.client.post(url, headers=headers, json=json, timeout=timeout)
 
 
+class OpenRouterClient:
+    # Verified against the public catalog on 2026-10-05. Models without JSON
+    # mode still receive the JSON instruction and must pass the local parser.
+    plain_json_models = {
+        'inclusionai/ling-3.0-flash-sante:free', 'qwen/qwen3.8-27b:free',
+        'nvidia/nemotron-3.5-lightning:free', 'nvidia/nemotron-3-ultra-550b-a55b:free',
+        'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free'}
+    optional_thinking_models = plain_json_models | {
+        'google/gemma-4-31b-it:free', 'google/gemma-4-26b-a4b-it:free',
+        'apodex/apodex-1.1-mini:free', 'dots-studio/dots-3-note-preview:free',
+        'nvidia/nemotron-3-super-120b-a12b:free'}
+
+    def __init__(self, client):
+        self.client = client
+
+    async def post(self, url, headers, json, timeout):
+        body = dict(json)
+        model = body['model']
+        if model in self.plain_json_models:
+            body.pop('response_format', None)
+        if model in self.optional_thinking_models:
+            body['reasoning'] = {'enabled': False, 'exclude': True}
+        # Prevent an implicit paid fallback within OpenRouter.
+        body['provider'] = {'max_price': {'prompt': 0, 'completion': 0}}
+        if not hasattr(self, 'request_lock'):
+            self.request_lock, self.next_request_at = asyncio.Lock(), 0
+        async with self.request_lock:
+            await asyncio.sleep(max(0, self.next_request_at - time.monotonic()))
+            self.next_request_at = time.monotonic() + 4
+            return await self.client.post(url, headers=headers, json=body, timeout=timeout)
+
+
 class PacedAI(CompatibleAI):
     def __init__(self, settings, store, client, spacing):
         super().__init__(settings, store, client)
         self.spacing = spacing
 
     async def _send(self, request, article, timeout=90):
+        if urlsplit(self.s.ai_url).hostname == 'openrouter.ai':
+            return await self.client.post(self.s.ai_url, headers={'Authorization': 'Bearer ' + self.s.ai_key},
+                                          json=request, timeout=timeout)
         if urlsplit(self.s.ai_url).hostname == 'api.groq.com':
             return await super()._send(request, article, timeout=timeout)
         async with self.request_lock:
@@ -140,7 +175,7 @@ class AIRouter:
         optional = [
             ('cerebras', 'https://api.cerebras.ai/v1/chat/completions', settings.cerebras_api_key, settings.cerebras_model, client, 3),
             ('google', 'https://generativelanguage.googleapis.com/v1beta/models/' + quote(settings.google_model, safe='') + ':generateContent', settings.google_api_key, settings.google_model, GoogleClient(client), 3),
-            ('openrouter', 'https://openrouter.ai/api/v1/chat/completions', settings.openrouter_api_key, settings.openrouter_model, client, 4),
+            ('openrouter', 'https://openrouter.ai/api/v1/chat/completions', settings.openrouter_api_key, settings.openrouter_model, OpenRouterClient(client), 4),
             ('mistral', 'https://api.mistral.ai/v1/chat/completions', settings.mistral_api_key, settings.mistral_model, client, 3),
             ('cloudflare', f'https://api.cloudflare.com/client/v4/accounts/{settings.cloudflare_account_id}/ai/v1/chat/completions', settings.cloudflare_api_token if settings.cloudflare_account_id else '', settings.cloudflare_model, client, 3),
             ('kilo', 'https://api.kilo.ai/api/gateway/chat/completions', (settings.kilo_api_key or 'anonymous') if settings.kilo_enabled else '', settings.kilo_model, OptionalBearerClient(client), 20),
@@ -158,6 +193,49 @@ class AIRouter:
                 url, key, model, adapter, spacing = definitions[name]
                 derived = replace(settings, ai_url=url, ai_key=key, ai_model=model)
                 self.providers[name] = PacedAI(derived, store, adapter, spacing)
+        self.openrouter_variants = []
+        if 'openrouter' in self.providers and settings.openrouter_models:
+            original = self.providers['openrouter']
+            for model in settings.openrouter_models:
+                self.openrouter_variants.append(PacedAI(replace(original.s, ai_model=model), store, original.client, 4))
+            # All variants share one pacing clock and lock, including probes.
+            self.providers['openrouter'] = self.openrouter_variants[0]
+
+    def candidates(self, name):
+        variants = self.openrouter_variants if name == 'openrouter' and self.openrouter_variants else [self.providers[name]]
+        states = self.db.state('ai_openrouter_model_health', {})
+        return [p for p in variants
+                if name != 'openrouter' or not self.openrouter_variants or states.get(p.s.ai_model, {}).get('until', 0) <= utc()][:self.s.openrouter_max_model_attempts]
+
+    def mark_candidate(self, name, provider, status, reason='', cooldown=0, account=False):
+        if name != 'openrouter' or not self.openrouter_variants:
+            self.mark(name, status, reason, cooldown)
+            return
+        states = self.db.state('ai_openrouter_model_health', {})
+        old = states.get(provider.s.ai_model, {})
+        states[provider.s.ai_model] = {'status': status, 'reason': reason, 'at': utc(),
+            'until': utc() + cooldown if cooldown else 0,
+            'failures': old.get('failures', 0) + 1 if status != 'ok' else 0}
+        self.db.set('ai_openrouter_model_health', states)
+        self.mark(name, status, reason, cooldown if account else 0)
+
+    def generation_candidates(self):
+        attempted = 0
+        for name in self.providers:
+            if self.db.state('ai_provider_health', {}).get(name, {}).get('until', 0) > utc():
+                continue
+            candidates = self.candidates(name)
+            if not candidates:
+                continue
+            if attempted >= self.s.ai_max_provider_attempts:
+                break
+            attempted += 1
+            for provider in candidates:
+                # Account/auth/network failures stop this whole chain. Model
+                # capacity or invalid content only cool down the failed model.
+                if self.db.state('ai_provider_health', {}).get(name, {}).get('until', 0) > utc():
+                    break
+                yield name, provider
 
     @property
     def configured(self):
@@ -167,7 +245,12 @@ class AIRouter:
         day = datetime.now(timezone.utc).date().isoformat()
         states = self.db.state('ai_provider_health', {})
         return {'configured': bool(self.providers), 'configured_order': list(self.providers),
-                'implementation_revision': '2026-10-05-pinned-free-model-3',
+                'implementation_revision': '2026-10-05-multi-model-4',
+                'openrouter_model_order': [p.s.ai_model for p in self.openrouter_variants],
+                'openrouter_model_health': {
+                    p.s.ai_model: {**self.db.state('ai_openrouter_model_health', {}).get(p.s.ai_model, {}),
+                        'cooldown_remaining_seconds': max(0, int(self.db.state('ai_openrouter_model_health', {}).get(p.s.ai_model, {}).get('until', 0) - utc()))}
+                    for p in self.openrouter_variants},
                 'max_provider_attempts_per_draft': self.s.ai_max_provider_attempts,
                 'budget_day_utc': day,
                 'global_budget': {
@@ -184,12 +267,15 @@ class AIRouter:
         if name not in self.providers:
             raise ValueError('Unknown AI provider')
         async with self.lock:
-            provider = self.providers[name]
             state = self.db.state('ai_provider_health', {}).get(name, {})
             remaining = max(0, int(state.get('until', 0) - utc()))
             if remaining:
                 return {'provider': name, 'status': 'cooldown', 'seconds_remaining': remaining,
                         'note': 'No API request sent. Wait for cooldown; quota is not reset.'}
+            candidates = self.candidates(name)
+            if not candidates:
+                return {'provider': name, 'status': 'cooldown', 'note': 'All configured models cooling down; no API request sent.'}
+            provider = candidates[0]
             day = datetime.now(timezone.utc).date().isoformat()
             request = {'model': provider.s.ai_model,
                        'messages': [{'role': 'user', 'content':
@@ -222,6 +308,7 @@ class AIRouter:
                               404: 'Model or endpoint unavailable', 429: 'Provider quota/rate limit'}.get(
                                   response.status_code, 'Provider HTTP error')
                     result.update(status='failed', reason=reason)
+                    result['limit_scope'] = rate_limit_diagnostic(response)
                     cooldown = 3600 if response.status_code in (400, 401, 402, 403, 404) else 120
                     if response.status_code == 429:
                         try:
@@ -231,8 +318,9 @@ class AIRouter:
                         if re.search(r'daily|per[- ]day', response.text[:4000], re.I):
                             cooldown = max(cooldown, 3600)
                     # A diagnostic must not let callers hammer a real rate limit.
-                    self.mark(name, 'rate_limited' if response.status_code == 429 else 'unavailable',
-                              reason, cooldown)
+                    account = response.status_code in (401, 402) or result['limit_scope'] in ('account', 'daily')
+                    self.mark_candidate(name, provider, 'rate_limited' if response.status_code == 429 else 'unavailable',
+                                        reason, cooldown, account=account)
                 else:
                     data = response.json()
                     usage = data.get('usage', {})
@@ -256,7 +344,7 @@ class AIRouter:
                                       reason='API and JSON response working' if valid else 'Invalid title/body JSON structure')
             except httpx.HTTPError as error:
                 result.update(status='failed', **transport_diagnostic(error))
-                self.mark(name, 'unavailable', result['reason'], 120)
+                self.mark_candidate(name, provider, 'unavailable', result['reason'], 120, account=True)
             except (ValueError, KeyError, IndexError, TypeError, AttributeError):
                 result.update(status='failed', reason='Malformed response or JSON')
             tests = self.db.state('ai_connection_tests', {})
@@ -277,19 +365,16 @@ class AIRouter:
         # One generation at a time prevents dashboard/Telegram/worker requests
         # from all hammering a provider immediately after a quota failure.
         async with self.lock:
-            attempted = 0
-            for name, provider in self.providers.items():
-                state = self.db.state('ai_provider_health', {}).get(name, {})
-                if state.get('until', 0) > utc():
-                    continue
-                if attempted >= self.s.ai_max_provider_attempts:
+            deadline = time.monotonic() + (300 if article else 180)
+            for name, provider in self.generation_candidates():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     break
-                attempted += 1
                 try:
                     as_of = datetime.fromisoformat(evidence['timestamp'].replace('Z', '+00:00')).timestamp()
                     if not 0 <= utc() - as_of <= self.s.draft_max_age:
                         raise ValueError('Market evidence expired or future dated')
-                    result = await provider.generate(evidence, article)
+                    result = await asyncio.wait_for(provider.generate(evidence, article), timeout=min(90, remaining))
                     reasons = FactChecker(self.s, self.db).check({**result, 'article': article})
                     if evidence['source'] not in result['body'] + result['title'] or evidence['timestamp'] not in result['body'] + result['title']:
                         reasons.append('Missing source or timestamp')
@@ -297,8 +382,13 @@ class AIRouter:
                         reasons.append('Missing relevant ticker')
                     if reasons:
                         raise ValueError('; '.join(reasons))
+                except asyncio.TimeoutError:
+                    self.mark_candidate(name, provider, 'unavailable', 'AI request timed out', 120)
+                    continue
                 except AIRequestError as error:
-                    self.mark(name, 'rate_limited' if error.status == 429 else 'unavailable', str(error), error.cooldown)
+                    account = error.status in (0, 401, 402) or error.limit_scope in ('account', 'daily')
+                    self.mark_candidate(name, provider, 'rate_limited' if error.status == 429 else 'unavailable',
+                                        str(error), error.cooldown, account=account)
                     self.db.log('AI', f'{name}: HTTP {error.status}; trying next configured provider')
                     continue
                 except ValueError as error:
@@ -309,10 +399,10 @@ class AIRouter:
                         raise
                     # Only fixed reason/type, never the rejected output, is
                     # retained. Every backup passes the identical validator.
-                    self.mark(name, 'validation_failed', validation_reason(error), 300)
+                    self.mark_candidate(name, provider, 'validation_failed', validation_reason(error), 300)
                     self.db.log('AI', name + ': invalid output; trying next configured provider')
                     continue
-                self.mark(name, 'ok')
+                self.mark_candidate(name, provider, 'ok')
                 self.db.set('ai_last_success', {'provider': name, 'model': provider.s.ai_model, 'at': utc()})
                 return {**result, 'ai_provider': name, 'ai_model': provider.s.ai_model}
             raise ValueError('All configured AI providers unavailable')
