@@ -70,6 +70,8 @@ class Settings:
     google_model: str = 'gemma-4-31b-it'
     openrouter_api_key: str = field(default='', repr=False)
     openrouter_model: str = 'openrouter/free'
+    openrouter_models: tuple[str, ...] = ()
+    openrouter_max_model_attempts: int = 10
     mistral_api_key: str = field(default='', repr=False)
     mistral_model: str = 'mistral-small-latest'
     cloudflare_api_token: str = field(default='', repr=False)
@@ -167,6 +169,11 @@ class Settings:
             raise ValueError('AI budgets must be positive and provider attempts 1..10')
         if self.openrouter_api_key and not (self.openrouter_model == 'openrouter/free' or self.openrouter_model.endswith(':free')):
             raise ValueError('OpenRouter fallback must use a free-only model')
+        if (not 1 <= self.openrouter_max_model_attempts <= 10 or len(self.openrouter_models) > 10
+                or len(set(self.openrouter_models)) != len(self.openrouter_models)
+                or any(not m.endswith(':free') or len(m) > 160 or not re.fullmatch(r'[A-Za-z0-9_./:-]+', m)
+                       for m in self.openrouter_models)):
+            raise ValueError('OpenRouter model chain requires at most ten distinct free-only model IDs')
         if self.kilo_enabled and not (self.kilo_model == 'kilo-auto/free' or self.kilo_model.endswith(':free')):
             raise ValueError('Kilo fallback must use a free-only model')
         if self.google_api_key and self.google_model not in ('gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemini-3-flash-preview'):
