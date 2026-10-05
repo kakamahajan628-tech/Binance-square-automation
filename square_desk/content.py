@@ -67,6 +67,16 @@ class _NumericDraftError(ValueError):
                                           for m in matches]}
 
 
+def signal_text_errors(title, body, values, direction):
+    text = title + '\n' + body
+    if (direction not in ('long', 'short') or not re.search(r'\b' + direction + r'\b', text, re.I)
+            or any(not values.get(key) or values[key] not in text for key in ('entry', 'stop', 'target1', 'confidence'))):
+        return ['Signal draft missing setup levels or direction']
+    if 'The screening score is heuristic, not a calibrated probability.' not in text:
+        return ['Signal draft missing heuristic score disclosure']
+    return []
+
+
 class _LengthDraftError(ValueError):
     def __init__(self, count, lower, upper):
         super().__init__(f'AI body word count {count}; required {lower}-{upper}')
@@ -181,6 +191,14 @@ class CompatibleAI:
                              'support/resistance, conditional scenarios, invalidation, execution limitations '
                              'and unavailable evidence. Explain mechanisms and uncertainty without inventing '
                              'facts or padding with repeated statements. Do not return a short summary. ')
+        if evidence.get('signal_setup'):
+            instructions += (' This is a fresh revalidation of a paper candidate, not a trade execution. '
+                'State its supplied long/short direction as a conditional potential setup. '
+                'Include reference entry {{entry}}, invalidation stop {{stop}}, first target {{target1}}, '
+                'and screening score {{confidence}}. Copy this exact sentence: '
+                'The screening score is heuristic, not a calibrated probability. '
+                'Levels were recomputed from fresh closed candles; do not claim they are the original '
+                'tracking record, a confirmed entry, a realized outcome, or a calibrated win probability. ')
         request = {'model': self.s.ai_model,
                    'messages': [{'role': 'system', 'content': instructions},
                                 {'role': 'user', 'content': input_text}],
@@ -299,6 +317,10 @@ class CompatibleAI:
                     raw[key] = raw[key].replace('{{ticker}}', '$' + evidence['symbol'])
                 raw[key] = fill_tokens(raw[key], evidence)
             count = len(raw['body'].split())
+            if evidence.get('signal_setup'):
+                errors = signal_text_errors(raw['title'], raw['body'], evidence['facts'], evidence['signal_setup']['direction'])
+                if errors:
+                    raise ValueError(errors[0])
             if not lower <= count <= upper:
                 raise _LengthDraftError(count, lower, upper)
             return raw
@@ -376,6 +398,14 @@ class FactChecker:
             reasons.append('Word count outside configured limits')
         if draft.get('event'):
             event = draft['event']
+            if event.get('manual_signal_review'):
+                signal = self.db.get(event.get('signal_id'))
+                if (not signal or signal['kind'] != 'signal' or signal['status'] != 'watching'
+                        or signal['payload'].get('expires_at', 0) <= now
+                        or signal['payload'].get('symbol') != event['symbol']
+                        or signal['payload'].get('direction') != event.get('direction')):
+                    reasons.append('Signal is inactive or stale; use a fresh signal')
+                reasons.extend(signal_text_errors(draft['title'], draft['body'], facts(event), event.get('direction')))
             if now - event['as_of'] > self.s.draft_max_age or event['as_of'] > now:
                 reasons.append('Market evidence expired or future dated')
             if '$' + event['symbol'] not in text:
@@ -464,6 +494,10 @@ class ContentEngine:
                         'hourly_direction': 'up' if (event['changes'].get('1h') or 0) > 0 else 'down' if (event['changes'].get('1h') or 0) < 0 else 'flat or unavailable',
                         'volume': 'above baseline' if (m.get('relative_volume') or 0) > 1 else 'not above baseline',
                     }}
+        if event.get('manual_signal_review'):
+            evidence['signal_setup'] = {'direction': event['direction'], 'type': event['setup_type'],
+                'regime': event['setup_regime'], 'classification': 'potential_setup',
+                'levels': 'recomputed from current closed candles, not a historical paper outcome'}
         generated = 'deterministic'
         if self.ai:
             try:
@@ -475,7 +509,7 @@ class ContentEngine:
                 raise
         else:
             result = deterministic_draft(event)
-        needs_review = generated == 'ai' and not (self.s.mode == 'automatic' and self.s.ai_auto_publish)
+        needs_review = bool(event.get('manual_signal_review')) or (generated == 'ai' and not (self.s.mode == 'automatic' and self.s.ai_auto_publish))
         draft = {**result, 'event': event, 'article': article, 'risk': 'high' if event['category'] in ('shock', 'setup') else 'medium',
                  'priority': event['priority'], 'category': event['category'], 'generated_by': generated,
                  'human_review_required': needs_review, 'image': None, 'approved_at': None}
