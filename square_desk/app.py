@@ -6,6 +6,7 @@ import sqlite3
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import HTMLResponse, FileResponse
+from starlette.requests import ClientDisconnect
 from .config import Settings
 from .service import Desk
 from .news import add_source_record
@@ -36,10 +37,15 @@ def create_app(settings=None, desk=None, start_worker=True):
 
     async def bounded_json(request):
         body = bytearray()
-        async for chunk in request.stream():
-            body.extend(chunk)
-            if len(body) > 50000:
-                raise HTTPException(413, 'Request too large')
+        try:
+            async for chunk in request.stream():
+                body.extend(chunk)
+                if len(body) > 50000:
+                    raise HTTPException(413, 'Request too large')
+        except ClientDisconnect:
+            # A valid-looking prefix is not a complete request. Do not execute
+            # or replay any command/update when its body upload was interrupted.
+            raise HTTPException(408, 'Request body interrupted; no action accepted') from None
         return json.loads(body)
 
     def mutation_guard(request):
