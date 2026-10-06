@@ -56,7 +56,9 @@ class PostgresConnection:
         self.ready()
         try:
             # Only repository-owned SQL reaches this adapter; values stay bound.
-            statement = sql.replace('?', '%s') if args is not None else sql
+            # Escape literal SQL percent signs before introducing psycopg's
+            # placeholders. Bound values (JSON, cashtags, percent text) stay intact.
+            statement = sql.replace('%', '%%').replace('?', '%s') if args is not None else sql
             with self.raw.cursor() as cursor:
                 cursor.execute(statement, args)
                 rows = [Row(row) for row in cursor.fetchall()] if cursor.description else []
