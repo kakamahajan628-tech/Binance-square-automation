@@ -1,2 +1,0 @@
--r requirements-square.txt
-pytest>=8,<10
