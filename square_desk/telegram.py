@@ -188,9 +188,11 @@ class Telegram:
     async def _flush(self):
         if not self.s.telegram_token or utc() < self.db.state('telegram_retry_after', 0):
             return
-        for row in reversed(self.db.list('outbox', ['pending'], limit=10)):
+        for row in self.db.pending_notifications():
             p = row['payload']
             if p.get('next_attempt', 0) > utc():
+                if row.get('due') != p['next_attempt']:
+                    self.db.update(row['id'], due=p['next_attempt'])
                 continue
             if not self.db.claim(row['id'], 'pending', 'sending'):
                 continue
@@ -208,7 +210,8 @@ class Telegram:
             else:
                 p['attempts'] = p.get('attempts', 0) + 1
                 p['next_attempt'] = utc() + min(3600, 15 * 2 ** p['attempts'])
-                self.db.update(row['id'], status='failed' if p['attempts'] >= 5 else 'pending', payload=p)
+                self.db.update(row['id'], status='failed' if p['attempts'] >= 5 else 'pending', payload=p,
+                               due=p['next_attempt'])
                 if utc() < self.db.state('telegram_retry_after', 0):
                     break
 
@@ -313,6 +316,14 @@ class Telegram:
                 result = 'Job ' + command_id + ': internal ' + type(error).__name__ + ' at ' + job['stage'] + '. /ai_job aur /queue dekho; success confirm nahi hua.'
                 job.update(status='failed', reason=result)
             job['finished_at'] = utc()
+            # End progress before potentially slow delivery. Otherwise an
+            # already failed job keeps creating misleading "processing" replies.
+            progress.cancel()
+            try:
+                await progress
+            except asyncio.CancelledError:
+                pass
+            self.db.set('command_active_job', {})
             self.db.set('command_last_job', job)
             self.notify(result, key='command:' + str(update_id))
             await self.flush()
@@ -336,6 +347,8 @@ class Telegram:
         while True:
             self.db.set('command_active_job', job)
             await asyncio.sleep(self.s.ai_progress_seconds)
+            if job.get('finished_at') or job.get('status') in ('completed', 'failed', 'timeout', 'cancelled'):
+                return
             self.notify('Job ' + job['id'] + ' processing: ' + job['stage'] +
                         '. /ai_job available hai; command repeat mat karo.')
             await self.flush()
