@@ -151,6 +151,16 @@ class Repository:
         with self.lock:
             return [self.unpack(r) for r in self.conn.execute(sql, args)]
 
+    def pending_notifications(self, limit=10):
+        # Query the oldest due replies directly, rather than loading the latest
+        # ten and reversing them. Backoff rows cannot starve ready replies.
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM entities WHERE kind='outbox' AND status='pending' "
+                "AND (due IS NULL OR due<=?) ORDER BY created ASC,id ASC LIMIT ?",
+                (utc(), min(max(1, limit), 10)))
+            return [self.unpack(row) for row in rows]
+
     def update(self, ident, *, status=None, payload=None, due=None, clear_due=False):
         fields, args = ['updated=?'], [utc()]
         for key, value in (('status', status), ('payload', json.dumps(payload, allow_nan=False) if payload is not None else None), ('due', due)):
