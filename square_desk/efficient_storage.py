@@ -18,6 +18,10 @@ STATE_TAG = '_square_state_zlib_v1'
 MAX_VALUE = 32_000_000
 
 
+def volatile_observation(key):
+    return key.startswith(('cache:', 'provider:')) or key == 'latest_market'
+
+
 def packed(value):
     text = json.dumps(value, allow_nan=False)
     if len(text.encode()) < 1500:
@@ -67,21 +71,21 @@ class EfficientStorage:
                 self._ram_bytes -= size
 
     def state(self, key, default=None):
-        if self.efficient and (key.startswith('cache:') or key == 'latest_market'):
+        if self.efficient and volatile_observation(key):
             with self.lock:
                 item = self._volatile.get(key)
                 return deepcopy(item[0] if item else default)
         return unpacked(super().state(key, default))
 
     def set(self, key, value):
-        if self.efficient and (key.startswith('cache:') or key == 'latest_market'):
+        if self.efficient and volatile_observation(key):
             self._ram_set(self._volatile,key,value)
             self.transfer_stats['volatile_writes_avoided'] += 1
             return
         return super().set(key, packed(value) if self.efficient else value)
 
     def set_if_changed(self, key, value):
-        if self.efficient and (key.startswith('cache:') or key == 'latest_market'):
+        if self.efficient and volatile_observation(key):
             return self.set(key,value)
         return super().set_if_changed(key, packed(value) if self.efficient else value)
 
