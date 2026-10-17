@@ -84,6 +84,7 @@ class Desk:
         self.scan_task = None
         self.background_scans = False
         self.scan_last_error = ''
+        self.scan_observations = {}
         self.independent_control=False
         self.pulse_task=None
         self.recovery_attempts=0
@@ -113,6 +114,7 @@ class Desk:
                 'last_scan': last, 'data_fresh': bool(last and now - last <= self.s.scan_seconds * 2),
                 'scan_running': bool(self.scan_task and not self.scan_task.done()),
                 'scan_last_error': self.scan_last_error,
+                'scan': dict(self.scan_observations),
                 'queue_size': min(10000,self.db.count('draft',['queued','approved','review','chart_rendering','uploading_image'])),
                 'cleanup': {**self.cleanup.status(),'last_run':self.db.state('master_cleanup',{})},
                 'last_publication': self.db.state('last_publication'),
@@ -569,32 +571,78 @@ class Desk:
 
     async def scan(self):
         async with self.scan_lock:
+            started = time.monotonic()
+            self.scan_observations = {'started_at': utc(), 'phase': 'discovery', 'observed': 0,
+                                      'unavailable': 0, 'candidates': 0, 'drafts_created': 0}
             await self.refresh_universe()
             rows, snapshots = [], {}
             from .planning import PlanningStore
             tracking_store = PlanningStore(self.db)
-            for symbol in self.scan_symbols():
-                try:
-                    snap = await self.pool.fetch(symbol)
+            semaphore = asyncio.Semaphore(2)
+            async def observe(symbol):
+                async with semaphore:
                     try:
-                        slow = await self.pool.fetch(symbol, 3600)
+                        snap = await self.pool.fetch(symbol)
+                        try:
+                            slow = await self.pool.fetch(symbol, 3600)
+                        except (ProviderError, ValueError):
+                            slow = None
+                        return symbol, snap, slow
                     except (ProviderError, ValueError):
-                        slow = None
+                        return symbol, None, None
+            selected = self.scan_symbols()
+            tasks = [asyncio.create_task(observe(symbol)) for symbol in selected]
+            self.scan_observations.update(phase='market_data', requested=len(tasks))
+            try:
+                for completed in asyncio.as_completed(tasks):
+                    symbol, snap, slow = await completed
+                    if snap is None:
+                        self.scan_observations['unavailable'] += 1
+                        self.db.log('DATA', f'No fresh validated candles for {symbol}')
+                        continue
                     if slow and (slow.source != snap.source or slow.quote != snap.quote):
                         slow = None
-                    snapshots[symbol] = snap
-                    self.db.archive_snapshot(snap.dict())
-                    row = {'symbol': symbol, 'metrics': studies(snap), 'changes': changes(snap, slow)}
-                    row['derivatives'] = await self.derivatives.context(symbol) if self.derivatives else None
-                    rows.append(row)
-                    advance(tracking_store, snap, self.s)
-                except (ProviderError, ValueError):
-                    self.db.log('DATA', f'No fresh validated candles for {symbol}')
+                    # Validation is repeated after concurrent delivery; a fresh
+                    # socket result may have waited behind synchronous storage.
+                    try:
+                        snap.validate(utc(), self.s.candle_max_age)
+                        snapshots[symbol] = snap
+                        self.db.archive_snapshot(snap.dict())
+                        row = {'symbol': symbol, 'metrics': studies(snap), 'changes': changes(snap, slow)}
+                        row['derivatives'] = await self.derivatives.context(symbol) if self.derivatives else None
+                        rows.append(row)
+                        advance(tracking_store, snap, self.s)
+                        self.scan_observations['observed'] += 1
+                    except (ProviderError, ValueError):
+                        self.scan_observations['unavailable'] += 1
+                    await asyncio.sleep(0)
+            finally:
+                for task in tasks:
+                    if not task.done(): task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+            # Persist the buffered tracking pass. This flush was missing after
+            # the history-read optimization, leaving every outcome in RAM only.
+            changed = list(tracking_store.changed.items())
+            for offset in range(0, len(changed), 64):
+                batch = PlanningStore(self.db)
+                batch.changed = dict(changed[offset:offset+64])
+                batch.originals = tracking_store.originals
+                with self.db.transaction():
+                    lease = self.db.state('worker_lease', {})
+                    if self.publisher.worker_owner is not None and not (
+                        lease.get('owner') == self.publisher.worker_owner and lease.get('until', 0) > utc()):
+                        raise ValueError('Worker lease lost before tracking persistence')
+                    batch.flush()
+                await asyncio.sleep(0)
+            self.scan_observations['phase'] = 'candidate_selection'
+            rows.sort(key=lambda row: selected.index(row['symbol']))
             if self.market_cache:
                 self.market_cache.flush(self.db)
             if not rows:
                 self.telegram.notify('Market scan blocked: no fresh validated candles. Numerical publications are withheld.', key=f'data_fail:{int(utc() // 3600)}')
                 self.db.set('latest_market', [])
+                self.scan_observations.update(phase='finished', reason='No fresh validated candles',
+                    seconds=round(time.monotonic()-started, 2), finished_at=utc())
                 return
             previous = self.db.state('latest_market', []) if self.s.market_universe == 'top_liquid' else []
             current = {r['symbol']: r for r in previous if r['symbol'] in self.universe
@@ -624,27 +672,43 @@ class Desk:
                 candidates.extend(events(row, self.s))
             weights = self.db.state('category_weights', {})
             candidates.sort(key=lambda e: -(e['priority'] * weights.get(e['category'], 1)))
+            self.scan_observations['candidates'] = len(candidates)
+            self.scan_observations['reason'] = 'No qualifying market events' if not candidates else 'Evaluating candidates'
             created = 0
             attempted = 0
+            planning = PlanningStore(self.db)
+            # This is a generation plan only. Refresh it after every awaited
+            # draft attempt; the publisher always reads current controls again.
+            from .compliance import Compliance
+            planning_policy = Compliance(self.s, planning)
             for event in candidates:
-                if attempted >= self.s.max_drafts_per_scan or len(self.db.list('draft', ['review', 'approved', 'queued'])) >= 50:
+                if attempted >= self.s.max_drafts_per_scan or len(planning.list('draft', ['review', 'approved', 'queued'])) >= 50:
+                    self.scan_observations['reason'] = 'Draft attempt or review queue limit reached'
                     break
-                published = self.db.list('draft', PUBLICATION_STATES, limit=10000)
+                published = planning.list('draft', PUBLICATION_STATES, limit=10000)
                 start, hour = self.publisher.policy.window(utc())
                 total_today = sum(self.publisher.policy.window(r['payload'].get('submitted_at', r['updated']))[0] == start for r in published)
-                pending = len(self.db.list('draft', ['approved', 'queued'] if self.s.mode == 'automatic' else ['approved', 'queued', 'review']))
-                if total_today >= self.publisher.policy.caps()['daily'] or pending >= self.s.max_drafts_per_scan:
+                pending = len(planning.list('draft', ['approved', 'queued'] if self.s.mode == 'automatic' else ['approved', 'queued', 'review']))
+                if total_today >= planning_policy.caps()['daily'] or pending >= self.s.max_drafts_per_scan:
+                    self.scan_observations['reason'] = 'Daily publication cap or pending draft limit reached'
                     break
                 if self.s.mode == 'automatic' and self.s.ai_auto_publish:
                     if hour not in self.s.publishing_hours or event['category'] in ('shock', 'setup'):
+                        self.scan_observations['reason'] = 'Outside publication hours or event requires review'
                         continue
-                    gap = self.publisher.policy.caps()['gap']
-                    if utc() - self.db.state('last_auto_draft', 0) < gap:
+                    gap = planning_policy.caps()['gap']
+                    # Prepare one fresh draft shortly before the next possible
+                    # slot. A separate generation gap used to add scan + AI time
+                    # after every publication gap, progressively losing slots.
+                    last_sent = max((r['payload'].get('submitted_at', r['updated']) for r in published), default=0)
+                    media_pending = len(planning.list('draft', ['chart_rendering', 'uploading_image']))
+                    if pending or media_pending or utc() < last_sent + gap - min(300, gap/4):
+                        self.scan_observations['reason'] = 'Fresh draft already pending or next slot not yet near'
                         break
                 article = False
                 if self.s.auto_articles and self.s.mode == 'automatic' and self.s.ai_auto_publish and self.content.ai:
                     expected = min(self.s.article_daily_cap, int(hour >= 10) + int(hour >= 18))
-                    related = published + self.db.list('draft', ['approved', 'queued', 'review'])
+                    related = published + planning.list('draft', ['approved', 'queued', 'review'])
                     articles_today = sum(r['payload'].get('article', False)
                                          and self.publisher.policy.window(r['payload'].get('submitted_at', r['created']))[0] == start
                                          for r in related)
@@ -653,14 +717,20 @@ class Desk:
                     event = {**event, 'event_key': event['event_key'] + ':article'}
                 if any(r['status'] not in ('expired', 'rejected')
                        and (r['payload'].get('event') or {}).get('event_key') == event['event_key']
-                       for r in self.db.list('draft', since=utc() - 7*86400, limit=10000)):
+                       for r in planning.list('draft', since=int(start) - 7*86400, limit=10000)):
+                    self.scan_observations['reason'] = 'Event already has a draft'
                     continue
                 attempted += 1
                 if self.telegram.job_task and not self.telegram.job_task.done():
                     # Collect/track market evidence normally, but give manual
                     # generation the next AI slot rather than queueing a scan.
+                    self.scan_observations['reason'] = 'Manual generation owns the next AI slot'
                     break
                 try:
+                    if not 0 <= utc() - event['as_of'] <= self.s.candle_max_age:
+                        self.scan_observations['reason'] = 'Observation aged before drafting; next scan must refresh it'
+                        continue
+                    self.scan_observations.update(phase='draft_generation', symbol=event['symbol'])
                     ident = await self.content.draft(event, article=article)
                     await self.automatic_image_async(ident)
                     # Generate real charts only for useful events. Text-only live
@@ -681,12 +751,19 @@ class Desk:
                     created += 1
                 except (ValueError, sqlite3.IntegrityError) as error:
                     self.db.log('CONTENT', rejection_message(error))
+                    self.scan_observations['reason'] = rejection_message(error)
+                finally:
+                    planning = PlanningStore(self.db)
+                    planning_policy = Compliance(self.s, planning)
             day = datetime.now(ZoneInfo(self.s.timezone)).date().isoformat()
             if created == 0 and self.content.ai is None and self.db.state('last_education_day') != day:
                 ident = self.content.education()
                 if ident:
                     self.db.set('last_education_day', day)
                     self.telegram.notify('Educational draft ' + ident + '\n' + self.db.get(ident)['payload']['title'], key='draft:' + ident)
+            self.scan_observations.update(phase='finished', drafts_created=created, attempted=attempted,
+                seconds=round(time.monotonic()-started, 2), finished_at=utc())
+            if created: self.scan_observations['reason'] = 'Validated drafts created; publication gates apply'
 
     def weekly(self):
         now = datetime.now(ZoneInfo(self.s.timezone))
@@ -717,6 +794,7 @@ class Desk:
                 pass
             except Exception as error:
                 self.scan_last_error=type(error).__name__
+                self.scan_observations.update(phase='failed', reason=self.scan_last_error, finished_at=utc())
                 self.db.log('ERROR','Background scan failed: '+self.scan_last_error)
             self.scan_task=None
         self.start_image_upload()
