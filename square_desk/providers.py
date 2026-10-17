@@ -25,23 +25,37 @@ class Transport:
         self.locks = defaultdict(asyncio.Lock)
         self.next_at = defaultdict(float)
         self.health = {}
+        self.slots = defaultdict(lambda: asyncio.Semaphore(2))
+        self.spacing_seconds = 1.1
+        self.attempt_seconds = 6
+
+    async def pace(self, host):
+        # Only request starts are serialized. A slow socket must not own the
+        # pacing lock through retries and block unrelated fresh observations.
+        async with self.locks[host]:
+            while True:
+                delay = self.next_at[host] - time.monotonic()
+                if delay > 10:
+                    raise ProviderError('Provider cooling down')
+                if delay <= 0:
+                    self.next_at[host] = time.monotonic() + self.spacing_seconds
+                    return
+                await asyncio.sleep(delay)
 
     async def get(self, host, path, params=None):
-        async with self.locks[host]:
-            if self.next_at[host] - time.monotonic() > 10:
-                raise ProviderError('Provider cooling down')
-            await asyncio.sleep(max(0, self.next_at[host] - time.monotonic()))
-            for attempt in range(3):
-                self.next_at[host] = time.monotonic() + 1.1
+        for attempt in range(2):
+            async with self.slots[host]:
+                await self.pace(host)
                 try:
-                    response = await self.client.get(host + path, params=params)
+                    response = await asyncio.wait_for(self.client.get(host + path, params=params,
+                        timeout=self.attempt_seconds), timeout=self.attempt_seconds)
                     code = response.status_code
                     if code in (401, 403, 418, 451, 429):
                         try:
                             delay = max(60, float(response.headers.get('Retry-After', '3600')))
                         except ValueError:
                             delay = 3600
-                        self.next_at[host] = time.monotonic() + delay
+                        self.next_at[host] = max(self.next_at[host], time.monotonic() + delay)
                         self.health[host] = {'status': 'restricted' if code != 429 else 'rate_limited', 'http': code, 'at': utc()}
                         raise ProviderError(f'HTTP {code}; request suspended')
                     if code >= 500:
@@ -51,11 +65,12 @@ class Transport:
                     data = response.json()
                     self.health[host] = {'status': 'ok', 'at': utc()}
                     return data
-                except (httpx.HTTPError, ValueError):
-                    if attempt < 2:
-                        await asyncio.sleep(2 ** attempt)
-            self.health[host] = {'status': 'unavailable', 'at': utc()}
-            raise ProviderError('Provider unavailable after bounded retries')
+                except (httpx.HTTPError, ValueError, asyncio.TimeoutError):
+                    pass
+            if attempt == 0:
+                await asyncio.sleep(1)
+        self.health[host] = {'status': 'unavailable', 'at': utc()}
+        raise ProviderError('Provider unavailable after bounded retries')
 
 
 class BinanceProvider:
@@ -132,15 +147,25 @@ class CoinbaseProvider:
 class ProviderPool:
     def __init__(self, providers, store, max_age):
         self.providers, self.store, self.max_age = providers, store, max_age
+        self.fetch_locks = defaultdict(asyncio.Lock)
 
     async def fetch(self, symbol, interval=900):
+        # Shared scan/manual requests reuse a completed validated observation;
+        # cancelling a waiter never cancels the request belonging to another job.
+        async with self.fetch_locks[(symbol, interval)]:
+            return await self._fetch(symbol, interval)
+
+    async def _fetch(self, symbol, interval):
         key = f'cache:{symbol}:{interval}'
         cached = self.store.state(key)
         # Five minute cache TTL; original observation timestamp is never rewritten.
         if cached and utc() - cached['fetched_at'] < 300:
-            snap = Snapshot.read(cached)
-            snap.validate(utc(), self.max_age if interval == 900 else max(self.max_age, interval + 300))
-            return snap
+            try:
+                snap = Snapshot.read(cached)
+                snap.validate(utc(), self.max_age if interval == 900 else max(self.max_age, interval + 300))
+                return snap
+            except (ValueError, KeyError, TypeError):
+                pass  # A recent fetch can contain an observation that has aged.
         for provider in self.providers:
             try:
                 snap = await provider.candles(symbol, interval)
