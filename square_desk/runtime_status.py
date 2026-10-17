@@ -3,7 +3,7 @@ import asyncio
 import logging
 import time
 
-REVISION='2026-10-16-render-deadline-13'
+REVISION='2026-10-17-flow-recovery-14'
 
 
 class RuntimeStatus:
@@ -51,6 +51,7 @@ class RuntimeStatus:
                 'last_confirmed':dict(getattr(desk.publisher,'last_confirmed',{})),
                 'last_plan':dict(getattr(desk.scheduler,'last_plan',{})),
                 'global_controls':'Unknown in this memory-only view; /status full reads database controls'},
+            'scan':dict(getattr(desk,'scan_observations',{})),
             'configuration':{'paper_mode':desk.s.paper_mode,'mode':desk.s.mode,
                 'ai_auto_publish':desk.s.ai_auto_publish,'daily_target':desk.s.daily_target,
                 'hourly_cap':desk.s.hourly_cap,'gap_seconds':desk.s.gap_seconds,
