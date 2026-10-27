@@ -1,0 +1,46 @@
+# Canonical Free Web Service blueprint. Existing manual services keep their ENV.
+services:
+  - type: web
+    name: binance-square-automation
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements-square.txt
+    startCommand: python -m square_desk
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.14
+      - key: PYTHONUNBUFFERED
+        value: '1'
+      - key: DESK_DATABASE_URL
+        sync: false
+      - key: DESK_NEON_DATABASE_URL
+        sync: false
+      - key: DESK_AIVEN_DATABASE_URL
+        sync: false
+      - key: DESK_SUPABASE_DATABASE_URL
+        sync: false
+      - key: DESK_TURSO_JOURNAL_URL
+        sync: false
+      - key: DESK_TURSO_JOURNAL_TOKEN
+        sync: false
+      - key: DESK_DB_FALLBACK_ENABLED
+        sync: false
+      - key: DESK_DB_FRESH_START
+        sync: false
+      - key: DESK_DB_CLUSTER_ID
+        sync: false
+      - key: DESK_DB_FALLBACK_ORDER
+        value: neon,aiven,supabase
+      - key: DESK_STORAGE_EFFICIENT
+        value: 'true'
+      - key: DESK_ADMIN_TOKEN
+        sync: false
+      - key: DESK_TELEGRAM_TOKEN
+        sync: false
+      - key: DESK_TELEGRAM_ADMINS
+        sync: false
+      - key: DESK_WEBHOOK_SECRET
+        sync: false
+      - key: DESK_SQUARE_KEY
+        sync: false
