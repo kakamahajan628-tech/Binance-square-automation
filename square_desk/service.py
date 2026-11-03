@@ -859,6 +859,7 @@ class Desk:
             except Exception as error:
                 self.scan_last_error=type(error).__name__
                 self.scan_observations.update(phase='failed', reason=self.scan_last_error, finished_at=utc())
+                logging.getLogger('square_desk').error(json.dumps(self.runtime_status.failure('background_scan',error)))
                 self.db.log('ERROR','Background scan failed: '+self.scan_last_error)
             self.scan_task=None
         self.start_image_upload()
@@ -942,7 +943,7 @@ class Desk:
                 self.lease_owned = self.db.acquire_lease(self.owner, 120)
             except Exception as exc:
                 self.lease_owned = False
-                logging.getLogger('square_desk').error('Worker lease renewal failed: %s', type(exc).__name__)
+                logging.getLogger('square_desk').error(json.dumps(self.runtime_status.failure('heartbeat',exc)))
             if not self.lease_owned:
                 await self.stop_scan()
                 await self.telegram.stop_job()
@@ -971,7 +972,8 @@ class Desk:
                     await self.telegram.poll()
                     await self.telegram.flush()
                 except Exception as error:
-                    logging.getLogger('square_desk').error('Telegram control unavailable: %s', type(error).__name__)
+                    component='telegram_delivery' if self.telegram.control_runtime else 'telegram_control'
+                    logging.getLogger('square_desk').error(json.dumps(self.runtime_status.failure(component,error)))
             else:
                 await self.telegram.stop_job()
             await asyncio.sleep(3)
@@ -1025,7 +1027,7 @@ class Desk:
                 raise
             except Exception as exc:
                 # Exception class only; network exception strings may hold keys.
-                logging.getLogger('square_desk').error(json.dumps({'category': 'ERROR', 'at': utc(), 'correlation': self.owner, 'error_type': type(exc).__name__}))
+                logging.getLogger('square_desk').error(json.dumps(self.runtime_status.failure('worker_cycle',exc)))
                 try:
                     self.db.log('ERROR', 'Worker cycle failed: ' + type(exc).__name__)
                     self.telegram.notify('A worker cycle failed. Review /errors; publication safety checks remain active.', key=f'worker_error:{int(utc() // 3600)}')
@@ -1057,7 +1059,7 @@ class Desk:
                 # after a cooldown and fresh exclusive lease acquisition.
                 logging.getLogger('square_desk').warning('Worker interrupted; waiting before safe restart')
             except Exception as exc:
-                logging.getLogger('square_desk').error('Worker unavailable: %s', type(exc).__name__)
+                logging.getLogger('square_desk').error(json.dumps(self.runtime_status.failure('worker_supervisor',exc)))
             self.lease_owned = False
             await self.stop_scan()
             if self.heartbeat_task:
