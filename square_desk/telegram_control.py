@@ -206,7 +206,7 @@ class TelegramControl:
             text=str(message.get('text','')).strip()
             parts=text.split(maxsplit=1)
             name=parts[0].split('@')[0].lower() if parts else ''
-            direct=(name in ('/runtime','/help','/start') or name in ('/status','/publish_status','/image_status') and len(parts)==1)
+            direct=(name in ('/runtime','/help','/start') or name in ('/status','/publish_status','/image_status','/providers','/data_status') and len(parts)==1)
             self.pending[ident]['direct']=direct
             if not self.allowed_rate(message['from']['id']):self.pending[ident]['done']=True
         # Read-only telemetry can pass a slow outstanding command without
@@ -219,6 +219,8 @@ class TelegramControl:
                     result_text='Use /status for runtime observations, /image_status for chart diagnostics, /status full or /image_status full for database details, /queue and /errors. Publishing and safety commands retain database checks.'
                 elif text == '/image_status':
                     result_text=json.dumps(self.desk.image_status(),separators=(',',':'),ensure_ascii=False)
+                elif text in ('/providers','/data_status'):
+                    result_text=json.dumps({'status_source':'memory_observations','providers':self.desk.pool.observations()},separators=(',',':'))
                 else:result_text=json.dumps(self.desk.runtime_status.snapshot(),separators=(',',':'),ensure_ascii=False)
                 sent=await self.send(item['message']['from']['id'],result_text)
                 if sent:
