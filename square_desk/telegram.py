@@ -570,7 +570,7 @@ class Telegram:
             from .news import news_draft
             return 'Reviewed news draft ' + news_draft(self.db, self.desk.content.checker, arg)
         if command in ('/providers', '/data_status'):
-            return json.dumps({name: self.db.state('provider:' + name, {'status': 'not_checked'}) for name in self.s.providers}, indent=2)
+            return json.dumps({'status_source':'memory_observations','providers':self.desk.pool.observations()}, indent=2)
         if command in ('/errors', '/logs'):
             return json.dumps(self.db.logs(15), indent=2)
         if command == '/settings':
