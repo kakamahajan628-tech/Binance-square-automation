@@ -3,7 +3,7 @@ import asyncio
 import logging
 import time
 
-REVISION='2026-10-26-exact-chart-recovery-22'
+REVISION='2026-11-02-market-diagnostics-23'
 
 
 class RuntimeStatus:
@@ -14,6 +14,22 @@ class RuntimeStatus:
         self.tick_at=0
         self.warning_at=0
         self.completed_at=None
+        self.last_failure={}
+
+    def failure(self, component, error):
+        from .database_failover import replica_error
+        from .postgres import DatabaseUnavailable
+        allowed={'worker_cycle','background_scan','telegram_control','telegram_delivery','heartbeat','worker_supervisor'}
+        self.last_failure={'component':component if component in allowed else 'worker_cycle',
+            'at':time.time(),'code':replica_error(error) if isinstance(error,DatabaseUnavailable) else 'internal_error'}
+        connection=self.desk.db.conn
+        provider=getattr(connection,'current',None)
+        if provider in ('neon','aiven','supabase'):self.last_failure['active_provider']=provider
+        code=getattr(connection,'last_error','')
+        if code in {'journal_unavailable_or_writer_busy','no_verified_current_replica',
+                    'operation_outcome_requires_journal_reconciliation','waiting_for_verified_replica'}:
+            self.last_failure['database_state']=code
+        return dict(self.last_failure)
 
     def stage(self,name):
         self.phase,self.phase_at=name,time.time()
@@ -45,6 +61,7 @@ class RuntimeStatus:
         runtime=getattr(desk.telegram,'control_runtime',None)
         ai=getattr(getattr(desk,'content',None),'ai',None)
         observations=getattr(ai,'observations',None)
+        market_observations=getattr(getattr(desk,'pool',None),'observations',None)
         return {'implementation_revision':REVISION,'status_source':'memory_observations',
             'observed_at':now,'publication_authority':'Database checks still run before every post; this report cannot authorize posting',
             'worker':{'phase':self.phase,'phase_age_seconds':round(max(0,now-self.phase_at),1),
@@ -61,6 +78,8 @@ class RuntimeStatus:
                 'last_plan':dict(getattr(desk.scheduler,'last_plan',{})),
                 'global_controls':'Unknown in this memory-only view; /status full reads database controls'},
             'scan':dict(getattr(desk,'scan_observations',{})),
+            'market_data':market_observations(compact=True) if callable(market_observations) else {},
+            'last_runtime_failure':dict(self.last_failure),
             'ai':observations(compact=True) if callable(observations) else {'configured':ai is not None},
             'manual_posts':{'daily_cap':10,'separate_from_automatic':True,
                 'last':dict(getattr(getattr(desk,'manual',None),'last',{}))},
