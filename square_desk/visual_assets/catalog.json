@@ -1,0 +1,499 @@
+{
+  "version": "editorial-art-v32-1",
+  "origin": "32 original imagegen conceptual scenes, prepared for the requested deterministic Pillow composite; not market evidence",
+  "assets": [
+    {
+      "id": "own-compass",
+      "families": [
+        1,
+        3,
+        4,
+        6,
+        10
+      ],
+      "pattern": "\\b(independent|belief|opinion|bias|research|conviction)\\b",
+      "meaning": "Independent thinking",
+      "sha256": "9f0ac0f62ae3f0d5f0beb968fdf5ac27173b48cd8384e5a0ac1cbb76d2910e91",
+      "bytes": 44691,
+      "atlas_sha256": "90d563d09dfc57fca3a9b24fda0e66e50798d78a7677ffb252bee48cd67c5d7f"
+    },
+    {
+      "id": "lighthouse",
+      "families": [
+        1,
+        4,
+        5,
+        6
+      ],
+      "pattern": "\\b(risk|navigate|navigation|loss|volatility|uncertain)\\b",
+      "meaning": "Navigation amid uncertainty",
+      "sha256": "430087ffb0a5b8e8c073456d08ecc369f29b35a08621d31be7078731fe00a8d8",
+      "bytes": 42803,
+      "atlas_sha256": "90d563d09dfc57fca3a9b24fda0e66e50798d78a7677ffb252bee48cd67c5d7f"
+    },
+    {
+      "id": "pause-timer",
+      "families": [
+        1,
+        3,
+        4,
+        5,
+        9
+      ],
+      "pattern": "\\b(pause|patience|impuls|time|wait|discipline)\\w*",
+      "meaning": "Pause before acting",
+      "sha256": "6a24e76dcab1ac1fa9ebefff53db8b09efda657ff2832a9a578fe3631e96ae7a",
+      "bytes": 38173,
+      "atlas_sha256": "90d563d09dfc57fca3a9b24fda0e66e50798d78a7677ffb252bee48cd67c5d7f"
+    },
+    {
+      "id": "evidence-puzzle",
+      "families": [
+        2,
+        3,
+        7,
+        10
+      ],
+      "pattern": "\\b(evidence|missing|clue|proof|confirm|verify)\\w*",
+      "meaning": "Evidence and missing pieces",
+      "sha256": "9176732b6391677afc6736b05a5cfe476e532baef470046a4aa9a397990b54cf",
+      "bytes": 45911,
+      "atlas_sha256": "90d563d09dfc57fca3a9b24fda0e66e50798d78a7677ffb252bee48cd67c5d7f"
+    },
+    {
+      "id": "two-lenses",
+      "families": [
+        2,
+        3,
+        6,
+        7,
+        8
+      ],
+      "pattern": "\\b(framing|perspective|comparison|compare|view|reference)\\w*",
+      "meaning": "Different frames for one object",
+      "sha256": "8cffaa9be521d99fbf13b5a40176a4ac85907357b4d690cadc12c6a7f3d23cdc",
+      "bytes": 39220,
+      "atlas_sha256": "90d563d09dfc57fca3a9b24fda0e66e50798d78a7677ffb252bee48cd67c5d7f"
+    },
+    {
+      "id": "coin-seed",
+      "families": [
+        2,
+        3,
+        6,
+        8,
+        9,
+        10
+      ],
+      "pattern": "\\b(price|value|cheap|valuation|unit|project)\\w*",
+      "meaning": "Price versus value",
+      "sha256": "a51b9cea15401573a01bce93dc61428c4c63f534ec5343faf605045ffcdec119",
+      "bytes": 40352,
+      "atlas_sha256": "90d563d09dfc57fca3a9b24fda0e66e50798d78a7677ffb252bee48cd67c5d7f"
+    },
+    {
+      "id": "umbrella",
+      "families": [
+        1,
+        2,
+        4,
+        5,
+        6
+      ],
+      "pattern": "\\b(uncertain|protect|risk|drawdown|loss|storm)\\w*",
+      "meaning": "Protection is conditional",
+      "sha256": "c6593cf735d9372d0e654fb9173d64068ee4de6ab4f38a6881df915525d1074d",
+      "bytes": 42760,
+      "atlas_sha256": "90d563d09dfc57fca3a9b24fda0e66e50798d78a7677ffb252bee48cd67c5d7f"
+    },
+    {
+      "id": "branching-paths",
+      "families": [
+        1,
+        2,
+        4,
+        5,
+        7,
+        10
+      ],
+      "pattern": "\\b(scenario|alternative|choice|decision|path|forecast|prediction)\\w*",
+      "meaning": "Alternative scenarios",
+      "sha256": "c775a7637ae39ee7da23dc47728346ea5bb7a8c3286e43f38d7c9882a3a2de7a",
+      "bytes": 49886,
+      "atlas_sha256": "90d563d09dfc57fca3a9b24fda0e66e50798d78a7677ffb252bee48cd67c5d7f"
+    },
+    {
+      "id": "domino-shield",
+      "families": [
+        1,
+        3,
+        4,
+        5,
+        6,
+        9
+      ],
+      "pattern": "\\b(stop|limit|loss|cascade|discipline|invalidation)\\w*",
+      "meaning": "Limits interrupt a sequence",
+      "sha256": "9b0cb597d8431bfe46abb9cf9ef4ee094df31bceeda7900db824b5c77ccd4da0",
+      "bytes": 27303,
+      "atlas_sha256": "790fd395e524259e6eaae7b15133270a79d996ef8bdbe2c0598f6af59506f138"
+    },
+    {
+      "id": "seed-shadow",
+      "families": [
+        2,
+        3,
+        6,
+        9,
+        10
+      ],
+      "pattern": "\\b(growth|value|valuation|potential|expectation|future)\\w*",
+      "meaning": "Potential is not an outcome",
+      "sha256": "e96d124130a380c773310ebc6bdec59adfd867338286f27d739efe2aa12f6ea0",
+      "bytes": 22438,
+      "atlas_sha256": "790fd395e524259e6eaae7b15133270a79d996ef8bdbe2c0598f6af59506f138"
+    },
+    {
+      "id": "iceberg",
+      "families": [
+        2,
+        6,
+        7,
+        8
+      ],
+      "pattern": "\\b(liquidity|visible|hidden|depth|volume|order)\\w*",
+      "meaning": "Visible and unseen context",
+      "sha256": "c6bffe06db78beb0b33601877959af32fb7b843fd43ef2781cda10e3a8348b6d",
+      "bytes": 28774,
+      "atlas_sha256": "790fd395e524259e6eaae7b15133270a79d996ef8bdbe2c0598f6af59506f138"
+    },
+    {
+      "id": "safety-rope",
+      "families": [
+        1,
+        4,
+        5,
+        6
+      ],
+      "pattern": "\\b(risk|stop|execution|plan|distance|invalidation)\\w*",
+      "meaning": "Execution and failure conditions",
+      "sha256": "029ef201042dfa3e0b004a7621628ba3e2baa79d6254c8f65e9c4f9058b18d7f",
+      "bytes": 35421,
+      "atlas_sha256": "790fd395e524259e6eaae7b15133270a79d996ef8bdbe2c0598f6af59506f138"
+    },
+    {
+      "id": "kettle",
+      "families": [
+        2,
+        6,
+        7,
+        9
+      ],
+      "pattern": "\\b(volume|pressure|activity|movement|effort|cause)\\w*",
+      "meaning": "Activity versus response",
+      "sha256": "29a266b111a0746fee45f03a8601acc23e8a8d6815d17adfda4cf6ce34a5e309",
+      "bytes": 30106,
+      "atlas_sha256": "790fd395e524259e6eaae7b15133270a79d996ef8bdbe2c0598f6af59506f138"
+    },
+    {
+      "id": "gears",
+      "families": [
+        2,
+        4,
+        6,
+        7,
+        8
+      ],
+      "pattern": "\\b(timeframe|time.frame|mechanism|window|trend|lag)\\w*",
+      "meaning": "Different timeframes interact",
+      "sha256": "0e378c7ae35aa1e1797326f7a724c7bd4fc47cd89567b7aa697b5dbc798ec0ce",
+      "bytes": 30427,
+      "atlas_sha256": "790fd395e524259e6eaae7b15133270a79d996ef8bdbe2c0598f6af59506f138"
+    },
+    {
+      "id": "stone-arch",
+      "families": [
+        2,
+        5,
+        6,
+        7,
+        8
+      ],
+      "pattern": "\\b(structure|support|resistance|foundation|confluence|level)\\w*",
+      "meaning": "Structure and its dependencies",
+      "sha256": "4ccc324b09128994abf1bfe793578911665d6c3e163fc355583e0bb4137ef6fe",
+      "bytes": 34296,
+      "atlas_sha256": "790fd395e524259e6eaae7b15133270a79d996ef8bdbe2c0598f6af59506f138"
+    },
+    {
+      "id": "prism",
+      "families": [
+        2,
+        3,
+        6,
+        7,
+        8,
+        10
+      ],
+      "pattern": "\\b(perspective|interpretation|evidence|comparison|bias|lens)\\w*",
+      "meaning": "Different interpretations",
+      "sha256": "cc0ebf0e6c946a948c570a26b62b7075756ff9641c910e0bb14a98c3ddab9daf",
+      "bytes": 25875,
+      "atlas_sha256": "790fd395e524259e6eaae7b15133270a79d996ef8bdbe2c0598f6af59506f138"
+    },
+    {
+      "id": "anchor-magnet",
+      "families": [
+        1,
+        3,
+        4,
+        6,
+        9
+      ],
+      "pattern": "\\b(anchor|anchoring|belief|reference|fixat|bias)\\w*",
+      "meaning": "Anchoring bias",
+      "sha256": "56a105c4dbd17b8c0c9449b123a9167ba672b6cc7bb62169069832a601c5282e",
+      "bytes": 38957,
+      "atlas_sha256": "ce2604d946d773f3f52f3c0ce16d3edde15c88077849d2eca7e3cab3a560469f"
+    },
+    {
+      "id": "large-shadow",
+      "families": [
+        1,
+        2,
+        3,
+        6,
+        9
+      ],
+      "pattern": "\\b(salience|attention|hype|exagger|size|noise)\\w*",
+      "meaning": "Salience and exaggeration",
+      "sha256": "b54f1108d036e53ef6bde8992730830eb66245ba6fa1030528d09fb9f27b59eb",
+      "bytes": 24911,
+      "atlas_sha256": "ce2604d946d773f3f52f3c0ce16d3edde15c88077849d2eca7e3cab3a560469f"
+    },
+    {
+      "id": "camera-context",
+      "families": [
+        2,
+        3,
+        4,
+        6,
+        7,
+        8
+      ],
+      "pattern": "\\b(zoom|context|detail|perspective|timeframe|window)\\w*",
+      "meaning": "Detail versus context",
+      "sha256": "65cf04e79de1919ed071c7e1daa0bb3dc548a94a9231e8b84747ae47abb3fdfb",
+      "bytes": 50903,
+      "atlas_sha256": "ce2604d946d773f3f52f3c0ce16d3edde15c88077849d2eca7e3cab3a560469f"
+    },
+    {
+      "id": "thread-filter",
+      "families": [
+        2,
+        3,
+        4,
+        6,
+        7,
+        9
+      ],
+      "pattern": "\\b(noise|filter|signal|relevant|separat|clue)\\w*",
+      "meaning": "Separate evidence from noise",
+      "sha256": "2ef195b108a384c1104adafd5123222437fa020dfe80bae56dee736bfa783695",
+      "bytes": 48552,
+      "atlas_sha256": "ce2604d946d773f3f52f3c0ce16d3edde15c88077849d2eca7e3cab3a560469f"
+    },
+    {
+      "id": "decision-maze",
+      "families": [
+        1,
+        3,
+        4,
+        5,
+        6,
+        9
+      ],
+      "pattern": "\\b(decision|choice|process|plan|rule|shortcut)\\w*",
+      "meaning": "Decision process",
+      "sha256": "074f5a6c6cf2a4bbcedb949f7ed5c3f6a738c91976241726da82110c130742d8",
+      "bytes": 40556,
+      "atlas_sha256": "ce2604d946d773f3f52f3c0ce16d3edde15c88077849d2eca7e3cab3a560469f"
+    },
+    {
+      "id": "unfinished-bridge",
+      "families": [
+        2,
+        4,
+        5,
+        6,
+        7,
+        10
+      ],
+      "pattern": "\\b(confirm|incomplete|missing|assumption|retest|acceptance)\\w*",
+      "meaning": "Incomplete confirmation",
+      "sha256": "5e813043192553b9ac85fea2c2e72547ea1f04258fb886460f9ed088be5e0a41",
+      "bytes": 42306,
+      "atlas_sha256": "ce2604d946d773f3f52f3c0ce16d3edde15c88077849d2eca7e3cab3a560469f"
+    },
+    {
+      "id": "clear-blocks",
+      "families": [
+        2,
+        3,
+        6,
+        7,
+        8
+      ],
+      "pattern": "\\b(confluence|independent|overlap|structure|correlation|compar)\\w*",
+      "meaning": "Overlap is not independence",
+      "sha256": "a490b953113a6fba6a6b0e3965e0772d2cb397b6a4f39d1c7adea268de52d0f4",
+      "bytes": 24120,
+      "atlas_sha256": "ce2604d946d773f3f52f3c0ce16d3edde15c88077849d2eca7e3cab3a560469f"
+    },
+    {
+      "id": "different-jars",
+      "families": [
+        2,
+        3,
+        6,
+        8,
+        9,
+        10
+      ],
+      "pattern": "\\b(same|different|label|appearance|social proof|popular)\\w*",
+      "meaning": "Similar appearance, different contents",
+      "sha256": "e3c68076940414fcc4e556b5cec3bbe7befa3c5faa21dfc391d82c8ab9a9c2e0",
+      "bytes": 39552,
+      "atlas_sha256": "ce2604d946d773f3f52f3c0ce16d3edde15c88077849d2eca7e3cab3a560469f"
+    },
+    {
+      "id": "telescope",
+      "families": [
+        1,
+        2,
+        3,
+        4,
+        6,
+        7,
+        8
+      ],
+      "pattern": "\\b(long.term|perspective|horizon|zoom|context|patient)\\w*",
+      "meaning": "Longer perspective",
+      "sha256": "b6fa085b1b4a5c9c823d1f6d85c675de5aa4dfd260974847a8603259e923b91a",
+      "bytes": 39137,
+      "atlas_sha256": "eda093ff079b2cda4ab4735a95a8f2dc87c9906af2547501783e30e318e043c7"
+    },
+    {
+      "id": "visible-repair",
+      "families": [
+        1,
+        3,
+        4,
+        5,
+        6,
+        10
+      ],
+      "pattern": "\\b(review|mistake|learn|accountability|receipt|wrong|outcome)\\w*",
+      "meaning": "Review without hiding mistakes",
+      "sha256": "1a0d8e50d4965d9f0208804640d1e181ca3a8466b77dec5414d92796500d986c",
+      "bytes": 52661,
+      "atlas_sha256": "eda093ff079b2cda4ab4735a95a8f2dc87c9906af2547501783e30e318e043c7"
+    },
+    {
+      "id": "checklist",
+      "families": [
+        1,
+        3,
+        4,
+        5,
+        7,
+        9,
+        10
+      ],
+      "pattern": "\\b(checklist|discipline|process|rule|verify|self.check)\\w*",
+      "meaning": "Repeatable research process",
+      "sha256": "b99ce79b68687689db3d36660f09baf6842ab1cb78dcb1050b64892ed2d9694a",
+      "bytes": 33210,
+      "atlas_sha256": "eda093ff079b2cda4ab4735a95a8f2dc87c9906af2547501783e30e318e043c7"
+    },
+    {
+      "id": "hourglass",
+      "families": [
+        1,
+        2,
+        4,
+        5,
+        6,
+        7
+      ],
+      "pattern": "\\b(expiry|expire|fresh|stale|time|wait|window)\\w*",
+      "meaning": "Time and evidence expiry",
+      "sha256": "ebd1e2ba6a6ea5ba1750fd2a8d6678561a1bf958f3fd852d906af7beb1a83214",
+      "bytes": 37558,
+      "atlas_sha256": "eda093ff079b2cda4ab4735a95a8f2dc87c9906af2547501783e30e318e043c7"
+    },
+    {
+      "id": "source-books",
+      "families": [
+        3,
+        6,
+        7,
+        9,
+        10
+      ],
+      "pattern": "\\b(source|trust|verify|rumor|rumour|honest|claim|proof)\\w*",
+      "meaning": "Source checking",
+      "sha256": "6262f2f5ac1fc2d89b68c4a1a3cc628831d93f5ef6f2cb599831b3940da25884",
+      "bytes": 36301,
+      "atlas_sha256": "eda093ff079b2cda4ab4735a95a8f2dc87c9906af2547501783e30e318e043c7"
+    },
+    {
+      "id": "quiet-bell",
+      "families": [
+        1,
+        3,
+        4,
+        5,
+        9
+      ],
+      "pattern": "\\b(notification|attention|overload|impuls|pause|calm)\\w*",
+      "meaning": "Notification overload",
+      "sha256": "8a9df6402be369d03d6f196e4609ed7d8fde4d0ee750a0e1a92da0beed65a83b",
+      "bytes": 32016,
+      "atlas_sha256": "eda093ff079b2cda4ab4735a95a8f2dc87c9906af2547501783e30e318e043c7"
+    },
+    {
+      "id": "shell-spiral",
+      "families": [
+        2,
+        3,
+        4,
+        6,
+        7,
+        8
+      ],
+      "pattern": "\\b(cycle|pattern|repeat|habit|recency|memory|rhythm)\\w*",
+      "meaning": "Patterns without certainty",
+      "sha256": "fbc72b38aa46886f38d593d06ac4bf181d5d74c0ce47bef386233eb1885cd056",
+      "bytes": 37866,
+      "atlas_sha256": "eda093ff079b2cda4ab4735a95a8f2dc87c9906af2547501783e30e318e043c7"
+    },
+    {
+      "id": "coin-segments",
+      "families": [
+        1,
+        2,
+        4,
+        5,
+        6,
+        9,
+        10
+      ],
+      "pattern": "\\b(risk|position|size|allocation|portion|capital|loss)\\w*",
+      "meaning": "Risk allocation concept",
+      "sha256": "035c84d477a67e6cbd4df8c4a8eb4afb3e266757eaf0e6a92d2d100eb6c762ba",
+      "bytes": 47942,
+      "atlas_sha256": "eda093ff079b2cda4ab4735a95a8f2dc87c9906af2547501783e30e318e043c7"
+    }
+  ]
+}
